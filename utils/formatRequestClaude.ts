@@ -1,0 +1,664 @@
+/**
+ * OpenAI to Claude request format converter
+ * @author jizhejiang
+ * @date 2025-08-11
+ * @update 2025-08-12
+ * @description Converts OpenAI API request format to Claude format, including message mapping,
+ * system prompts, function_call/tool_use conversion, and parameter mapping
+ * 
+ * Model Mapping Strategy (v2.0.0+):
+ * - Primary: Direct pass-through - model names are transmitted without conversion
+ * - Fallback: When mapping is needed (e.g., legacy compatibility):
+ *   - gpt-4 → claude-3-opus-20240229
+ *   - gpt-4-turbo → claude-3-sonnet-20240229
+ *   - gpt-3.5-turbo → claude-3-haiku-20240307
+ *   - Other models → pass through unchanged
+ */
+
+import type {
+  OpenAIRequest,
+  OpenAIMessage,
+  OpenAIMessageContent,
+  OpenAITextContent,
+  OpenAIImageContent,
+  OpenAITool,
+  OpenAIFunction,
+  OpenAIToolCall,
+  ClaudeRequest,
+  ClaudeMessage,
+  ClaudeContent,
+  ClaudeTextContent,
+  ClaudeImageContent,
+  ClaudeToolUseContent,
+  ClaudeToolResultContent,
+  ClaudeTool,
+  ClaudeSystemMessage,
+  RequestConverter,
+} from './types';
+
+// Model mapping removed - now passing model names directly without conversion
+
+/**
+ * Extract base64 data and media type from OpenAI image URL
+ */
+function extractBase64FromImageUrl(url: string): { mediaType: string; data: string } | null {
+  // Handle data URLs
+  const dataUrlMatch = url.match(/^data:([^;]+);base64,(.+)$/);
+  if (dataUrlMatch) {
+    return {
+      mediaType: dataUrlMatch[1],
+      data: dataUrlMatch[2],
+    };
+  }
+
+  // For HTTP(S) URLs, we cannot directly convert them
+  // This would require fetching the image which is async
+  // Return null to indicate the image cannot be converted
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    console.warn(`Cannot convert HTTP URL to base64: ${url}`);
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Map OpenAI media type to Claude supported types
+ */
+function mapMediaType(mediaType: string): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+  const normalized = mediaType.toLowerCase();
+
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) {
+    return 'image/jpeg';
+  } else if (normalized.includes('png')) {
+    return 'image/png';
+  } else if (normalized.includes('gif')) {
+    return 'image/gif';
+  } else if (normalized.includes('webp')) {
+    return 'image/webp';
+  }
+
+  // Default to JPEG for unknown types
+  console.warn(`Unknown media type ${mediaType}, defaulting to image/jpeg`);
+  return 'image/jpeg';
+}
+
+/**
+ * Convert OpenAI image content to Claude format
+ */
+function convertImageContent(content: OpenAIImageContent): ClaudeImageContent | null {
+  const { image_url } = content;
+  const extracted = extractBase64FromImageUrl(image_url.url);
+
+  if (!extracted) {
+    return null;
+  }
+
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: mapMediaType(extracted.mediaType),
+      data: extracted.data,
+    },
+  };
+}
+
+/**
+ * Convert OpenAI message content to Claude content format
+ */
+function convertMessageContent(
+  content: OpenAIMessageContent,
+  toolCalls?: OpenAIToolCall[],
+  toolCallId?: string
+): string | ClaudeContent[] {
+  // Handle tool result messages
+  if (toolCallId) {
+    const toolResult: ClaudeToolResultContent = {
+      type: 'tool_result',
+      tool_use_id: toolCallId,
+      content: typeof content === 'string' ? content : JSON.stringify(content),
+    };
+
+    // Check if content indicates an error
+    if (typeof content === 'string' && content.toLowerCase().startsWith('error:')) {
+      toolResult.is_error = true;
+    }
+
+    return [toolResult];
+  }
+
+  // Handle string content
+  if (typeof content === 'string') {
+    // If we have tool calls, combine text with tool use
+    if (toolCalls && toolCalls.length > 0) {
+      const claudeContent: ClaudeContent[] = [];
+
+      // Add text content if not empty
+      if (content.trim()) {
+        claudeContent.push({
+          type: 'text',
+          text: content,
+        });
+      }
+
+      // Add tool use content
+      for (const toolCall of toolCalls) {
+        const toolUse: ClaudeToolUseContent = {
+          type: 'tool_use',
+          id: toolCall.id,
+          name: toolCall.function.name,
+          input: JSON.parse(toolCall.function.arguments),
+        };
+        claudeContent.push(toolUse);
+      }
+
+      return claudeContent;
+    }
+
+    // Simple string content
+    return content;
+  }
+
+  // Handle array content or null/undefined content with tool_calls
+  const claudeContent: ClaudeContent[] = [];
+
+  // Process array content if it exists
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (item.type === 'text') {
+        claudeContent.push({
+          type: 'text',
+          text: item.text,
+        });
+      } else if (item.type === 'image_url') {
+        const imageContent = convertImageContent(item);
+        if (imageContent) {
+          claudeContent.push(imageContent);
+        } else {
+          // If image cannot be converted, add a text placeholder
+          claudeContent.push({
+            type: 'text',
+            text: `[Image: ${item.image_url.url}]`,
+          });
+        }
+      }
+    }
+  }
+
+  // Add tool calls if present (regardless of content being null/undefined/array)
+  if (toolCalls && toolCalls.length > 0) {
+    for (const toolCall of toolCalls) {
+      const toolUse: ClaudeToolUseContent = {
+        type: 'tool_use',
+        id: toolCall.id,
+        name: toolCall.function.name,
+        input: JSON.parse(toolCall.function.arguments),
+      };
+      claudeContent.push(toolUse);
+    }
+  }
+
+  // If only one text content, return as string
+  if (claudeContent.length === 1 && claudeContent[0].type === 'text') {
+    return claudeContent[0].text;
+  }
+
+  return claudeContent;
+}
+
+/**
+ * Convert OpenAI message to Claude message format
+ */
+function convertMessage(message: OpenAIMessage): ClaudeMessage | null {
+  // Handle system messages - will be extracted separately
+  if (message.role === 'system') {
+    return null;
+  }
+
+  // Handle function/tool messages
+  if (message.role === 'function' || message.role === 'tool') {
+    // Tool results are handled as part of user messages in Claude
+    // Create a user message with tool_result content
+    const toolResultContent: ClaudeToolResultContent = {
+      type: 'tool_result',
+      tool_use_id: message.tool_call_id || message.name || 'unknown',
+      content:
+        typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+    };
+
+    // Check if it's an error response
+    if (typeof message.content === 'string' && message.content.toLowerCase().includes('error')) {
+      toolResultContent.is_error = true;
+    }
+
+    return {
+      role: 'user',
+      content: [toolResultContent],
+    };
+  }
+
+  // Convert user or assistant messages
+  const claudeRole = message.role === 'user' ? 'user' : 'assistant';
+
+  // Handle function_call (legacy OpenAI format)
+  if (message.function_call) {
+    const toolUse: ClaudeToolUseContent = {
+      type: 'tool_use',
+      id: `func_${Date.now()}`,
+      name: message.function_call.name,
+      input: JSON.parse(message.function_call.arguments),
+    };
+
+    const content: ClaudeContent[] = [];
+
+    // Add text content if present
+    if (message.content && typeof message.content === 'string' && message.content.trim()) {
+      content.push({
+        type: 'text',
+        text: message.content,
+      });
+    }
+
+    content.push(toolUse);
+
+    return {
+      role: claudeRole,
+      content,
+    };
+  }
+
+  // Convert content with tool_calls
+  // Handle assistant messages without content but with tool_calls
+  const messageContent = message.content !== undefined ? message.content : '';
+  const content = convertMessageContent(messageContent, message.tool_calls, message.tool_call_id);
+
+  return {
+    role: claudeRole,
+    content,
+  };
+}
+
+/**
+ * Extract system messages from OpenAI messages
+ */
+function extractSystemMessages(messages: OpenAIMessage[]): {
+  system: string | ClaudeSystemMessage[] | undefined;
+  otherMessages: OpenAIMessage[];
+} {
+  const systemMessages: string[] = [];
+  const otherMessages: OpenAIMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      const content =
+        typeof message.content === 'string'
+          ? message.content
+          : message.content
+              .map((item) => (item.type === 'text' ? item.text : '[non-text content]'))
+              .join(' ');
+      systemMessages.push(content);
+    } else {
+      otherMessages.push(message);
+    }
+  }
+
+  if (systemMessages.length === 0) {
+    return { system: undefined, otherMessages };
+  }
+
+  // Combine multiple system messages
+  const combinedSystem = systemMessages.join('\n\n');
+
+  // Return as simple string or as ClaudeSystemMessage array for caching
+  return {
+    system: combinedSystem,
+    otherMessages,
+  };
+}
+
+/**
+ * Convert OpenAI tool/function to Claude tool format
+ */
+function convertTool(openAITool: OpenAITool | OpenAIFunction): ClaudeTool {
+  // Handle both OpenAITool and OpenAIFunction formats
+  const func = 'function' in openAITool ? openAITool.function : openAITool;
+
+  return {
+    name: func.name,
+    description: func.description || `Function ${func.name}`,
+    input_schema: {
+      type: 'object',
+      properties: (func.parameters.properties || func.parameters) as Record<string, unknown>,
+      required: (func.parameters.required || []) as string[],
+    },
+  };
+}
+
+/**
+ * Convert OpenAI tool_choice to Claude format
+ */
+function convertToolChoice(
+  openAIToolChoice?: OpenAIRequest['tool_choice']
+): ClaudeRequest['tool_choice'] {
+  if (!openAIToolChoice) {
+    return undefined;
+  }
+
+  if (typeof openAIToolChoice === 'string') {
+    switch (openAIToolChoice) {
+      case 'none':
+        return undefined; // Claude doesn't have a 'none' option
+      case 'auto':
+        return { type: 'auto' };
+      case 'required':
+        return { type: 'any' };
+      default:
+        return { type: 'auto' };
+    }
+  }
+
+  // Handle specific function choice
+  if (openAIToolChoice.type === 'function' && openAIToolChoice.function?.name) {
+    return {
+      type: 'tool',
+      name: openAIToolChoice.function.name,
+    };
+  }
+
+  return { type: 'auto' };
+}
+
+/**
+ * Map OpenAI model to Claude model
+ * 
+ * Current implementation: Direct pass-through without any conversion.
+ * Returns the input model name as-is to support flexible model routing.
+ * 
+ * Note: If model mapping is needed in the future, implement the mapping logic here.
+ * For scenarios where no model name is provided, a default mapping could be used.
+ * 
+ * @param openAIModel - The OpenAI model name to map
+ * @returns The model name unchanged (pass-through)
+ */
+function mapModel(openAIModel: string): string {
+  // Direct pass-through - no conversion
+  // If the model name is not in a predefined mapping, return the original value
+  return openAIModel;
+}
+
+/**
+ * Calculate max_tokens if not specified
+ * 
+ * Current implementation: Returns a universal default value for all models.
+ * This ensures compatibility with any model name without hardcoded checks.
+ * 
+ * @param model - The model name (unused in current implementation)
+ * @returns Default max_tokens value of 4096
+ */
+function calculateMaxTokens(model: string): number {
+  // Claude requires max_tokens to be specified
+  // Using a universal default value for all models to support flexibility
+  // If model-specific limits are needed in the future, they can be configured
+  // through external configuration rather than hardcoded checks
+  
+  // Universal default for all models
+  return 4096;
+}
+
+/**
+ * Convert OpenAI request to Claude format
+ * Main converter function that handles all aspects of the conversion
+ */
+export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest> = (
+  request: OpenAIRequest
+): ClaudeRequest => {
+  // Extract system messages
+  const { system, otherMessages } = extractSystemMessages(request.messages);
+
+  // Convert non-system messages
+  const claudeMessages: ClaudeMessage[] = [];
+
+  for (const openAIMessage of otherMessages) {
+    const converted = convertMessage(openAIMessage);
+    if (converted) {
+      claudeMessages.push(converted);
+    }
+  }
+
+  // Ensure every tool_use has matching tool_result
+  const completedMessages = ensureToolResultCoverage(claudeMessages);
+
+  // Ensure messages alternate between user and assistant
+  // Claude requires this strict alternation
+  const validatedMessages = validateMessageAlternation(completedMessages);
+
+  // Map model
+  const claudeModel = mapModel(request.model);
+
+  // Build Claude request
+  const claudeRequest: ClaudeRequest = {
+    model: claudeModel,
+    messages: validatedMessages,
+    max_tokens: request.max_tokens || calculateMaxTokens(claudeModel),
+  };
+
+  // Add system prompt if present
+  if (system) {
+    claudeRequest.system = system;
+  }
+
+  // Map temperature (same range 0-2 for both APIs)
+  if (request.temperature !== undefined) {
+    claudeRequest.temperature = request.temperature;
+  }
+
+  // Map top_p (same parameter name and range)
+  if (request.top_p !== undefined) {
+    claudeRequest.top_p = request.top_p;
+  }
+
+  // Map stop sequences
+  if (request.stop) {
+    if (typeof request.stop === 'string') {
+      claudeRequest.stop_sequences = [request.stop];
+    } else {
+      claudeRequest.stop_sequences = request.stop;
+    }
+  }
+
+  // Map stream flag
+  if (request.stream !== undefined) {
+    claudeRequest.stream = request.stream;
+  }
+
+  // Map user metadata
+  if (request.user) {
+    claudeRequest.metadata = {
+      user_id: request.user,
+    };
+  }
+
+  // Convert tools (both 'tools' and legacy 'functions' format)
+  const tools: ClaudeTool[] = [];
+
+  if (request.tools && request.tools.length > 0) {
+    tools.push(...request.tools.map(convertTool));
+  }
+
+  if (request.functions && request.functions.length > 0) {
+    tools.push(...request.functions.map(convertTool));
+  }
+
+  if (tools.length > 0) {
+    claudeRequest.tools = tools;
+  }
+
+  // Convert tool choice
+  if (request.tool_choice) {
+    claudeRequest.tool_choice = convertToolChoice(request.tool_choice);
+  } else if (request.function_call) {
+    // Handle legacy function_call parameter
+    if (typeof request.function_call === 'string') {
+      switch (request.function_call) {
+        case 'none':
+          // Don't set tool_choice
+          break;
+        case 'auto':
+          claudeRequest.tool_choice = { type: 'auto' };
+          break;
+        default:
+          claudeRequest.tool_choice = { type: 'auto' };
+      }
+    } else if (request.function_call.name) {
+      claudeRequest.tool_choice = {
+        type: 'tool',
+        name: request.function_call.name,
+      };
+    }
+  }
+
+  // Note: Some OpenAI parameters have no Claude equivalents:
+  // - n (number of completions)
+  // - presence_penalty
+  // - frequency_penalty
+  // - logit_bias
+  // - response_format
+  // - seed
+  // - logprobs
+  // - top_logprobs
+
+  // Note: Claude's top_k parameter has no OpenAI equivalent
+  // Could be set to a reasonable default if needed
+
+  return claudeRequest;
+};
+
+/**
+ * Validate and fix message alternation for Claude
+ * Claude requires strict user/assistant alternation
+ */
+function validateMessageAlternation(messages: ClaudeMessage[]): ClaudeMessage[] {
+  if (messages.length === 0) {
+    return messages;
+  }
+
+  const validated: ClaudeMessage[] = [];
+  let lastRole: ClaudeMessage['role'] | null = null;
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const nextMessage = messages[i + 1];
+    
+    // Check if current message has tool_use content
+    const hasToolUse = Array.isArray(message.content) && 
+      message.content.some(c => c.type === 'tool_use');
+    
+    // Check if next message has tool_result content
+    const nextHasToolResult = nextMessage && 
+      Array.isArray(nextMessage.content) && 
+      nextMessage.content.some(c => c.type === 'tool_result');
+    
+    // If assistant message has tool_use and next is user with tool_result,
+    // these should be kept together and not merged with other messages
+    if (hasToolUse && nextHasToolResult) {
+      // Add the assistant message with tool_use
+      validated.push(message);
+      lastRole = message.role;
+      continue;
+    }
+    
+    // If same role appears consecutively, merge them
+    const hasToolResult = Array.isArray(message.content) && 
+      message.content.some(c => c.type === 'tool_result');
+      
+    if (lastRole === message.role && validated.length > 0) {
+      const lastMessage = validated[validated.length - 1];
+      
+      // Don't merge if last message has tool_use content
+      const lastHasToolUse = Array.isArray(lastMessage.content) && 
+        lastMessage.content.some(c => c.type === 'tool_use');
+      
+      // Special case: merge tool_result messages (consecutive user messages with tool_result)
+      const lastHasToolResult = Array.isArray(lastMessage.content) && 
+        lastMessage.content.some(c => c.type === 'tool_result');
+      
+      // If either current or last has tool_use content, do NOT merge
+      const currentHasToolUseOnly = hasToolUse && !hasToolResult;
+      if (currentHasToolUseOnly || lastHasToolUse) {
+        validated.push(message);
+        lastRole = message.role;
+      } else if (hasToolResult && lastHasToolResult) {
+        // Merge tool_result contents
+        const lastContent = Array.isArray(lastMessage.content) ? lastMessage.content : [];
+        const currentContent = Array.isArray(message.content) ? message.content : [];
+        lastMessage.content = [...lastContent, ...currentContent];
+      } else if (!lastHasToolUse && !hasToolResult) {
+        // Merge regular content (not tool-related)
+        if (typeof lastMessage.content === 'string' && typeof message.content === 'string') {
+          lastMessage.content = `${lastMessage.content}\n\n${message.content}`;
+        } else {
+          // Convert to array and merge
+          const lastContent =
+            typeof lastMessage.content === 'string'
+              ? [{ type: 'text' as const, text: lastMessage.content }]
+              : lastMessage.content;
+          const currentContent =
+            typeof message.content === 'string'
+              ? [{ type: 'text' as const, text: message.content }]
+              : message.content;
+
+          lastMessage.content = [...lastContent, ...currentContent];
+        }
+      } else {
+        validated.push(message);
+        lastRole = message.role;
+      }
+    } else {
+      validated.push(message);
+      lastRole = message.role;
+    }
+  }
+
+  // Ensure first message is from user
+  if (validated.length > 0 && validated[0].role !== 'user') {
+    // Add a minimal user message at the beginning
+    validated.unshift({
+      role: 'user',
+      content: 'Continue.',
+    });
+  }
+
+  // Ensure last message is from user if we need a response
+  // This is typically handled by the API itself, but we can add if needed
+
+  return validated;
+}
+
+/**
+ * Ensure every assistant tool_use has a corresponding user tool_result.
+ * If a tool_use is missing its result, we leave it as-is since the API will
+ * provide a clear error message about which tool_call_id is missing.
+ * This approach is similar to gemini-router's handling.
+ */
+function ensureToolResultCoverage(messages: ClaudeMessage[]): ClaudeMessage[] {
+  // For now, just return messages as-is without injecting empty results
+  // The API will provide clear error messages if tool results are missing
+  // This prevents masking the actual issue with empty results
+  return messages;
+}
+
+// Export additional utilities for testing
+export const __testing = {
+  extractBase64FromImageUrl,
+  mapMediaType,
+  convertImageContent,
+  convertMessageContent,
+  convertMessage,
+  extractSystemMessages,
+  convertTool,
+  convertToolChoice,
+  mapModel,
+  calculateMaxTokens,
+  validateMessageAlternation,
+};

@@ -1,0 +1,16 @@
+name = "openai-router"
+main = "index.ts"
+compatibility_date = "2025-08-11"
+routes = [
+  { pattern = "openai-api.example.com", custom_domain = true }
+]
+
+# Enable logging
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Environment variables
+[vars]
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
