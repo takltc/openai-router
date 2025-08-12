@@ -13,7 +13,7 @@
   },
   "keywords": ["openai", "anthropic", "api", "router", "cloudflare-workers"],
   "author": "jizhejiang",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "description": "OpenAI API router for Cloudflare Workers with Anthropic support",
   "devDependencies": {
     "@eslint/js": "^9.31.0",
