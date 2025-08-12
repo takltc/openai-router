@@ -1,0 +1,16 @@
+# OpenAI Router Environment Variables
+# Copy this file to .dev.vars and configure your settings
+
+# OpenAI API Configuration
+OPENAI_BASE_URL=https://api.openai.com
+# Optional: Default API key for OpenAI (can be overridden by request headers)
+# OPENAI_API_KEY=sk-...
+
+# Anthropic API Configuration
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+# Optional: Default API key for Anthropic (can be overridden by request headers)
+# ANTHROPIC_API_KEY=sk-ant-...
+
+# You can also use proxy URLs if needed
+# OPENAI_BASE_URL=https://your-openai-proxy.com
+# ANTHROPIC_BASE_URL=https://your-anthropic-proxy.com

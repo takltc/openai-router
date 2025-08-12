@@ -1,0 +1,60 @@
+# Docker Compose configuration for OpenAI Router
+# Author: jizhejiang
+# Date: 2025-08-11
+
+version: '3.8'
+
+services:
+  openai-router:
+    # Build from local Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    # Container name
+    container_name: openai-router
+    
+    # Port mapping
+    ports:
+      - "8788:8788"
+    
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8788/"\]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+# Networks (using default bridge network)
+networks:
+  default:
+    driver: bridge
