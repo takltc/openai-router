@@ -141,3 +141,7 @@ dist
 *.swo
 *~
 .DS_Store
+
+# Claude
+.claude/
+CLAUDE.md
