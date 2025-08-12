@@ -2,8 +2,7 @@
 # Copy this file to .dev.vars for Docker development
 
 # API Base URLs
-OPENAI_BASE_URL=https://api.openai.com/v1
-ANTHROPIC_BASE_URL=https://api.anthropic.com
+OPENAI_BASE_URL=http://host.docker.internal:3001/proxy/modelscope/v1
 
 # API Keys (optional - can be provided via headers)
 # OPENAI_API_KEY=your-openai-api-key-here
