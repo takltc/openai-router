@@ -244,7 +244,7 @@ function convertMessage(
 /**
  * Extract system prompt from Claude system field
  */
-function extractSystemPrompt(system?: string | ClaudeSystemMessage[]): string | null {
+function extractSystemPrompt(system?: string | ClaudeSystemMessage[] | ClaudeSystemMessage | null): string | null {
   if (!system) {
     return null;
   }
@@ -253,8 +253,14 @@ function extractSystemPrompt(system?: string | ClaudeSystemMessage[]): string | 
     return system;
   }
 
-  // Extract text from ClaudeSystemMessage array
-  const systemTexts = system.filter((msg) => msg.type === 'text').map((msg) => msg.text);
+  // If a single ClaudeSystemMessage object is provided, normalize to array
+  const arr = Array.isArray(system) ? system : [system as ClaudeSystemMessage];
+
+  // Extract text safely from ClaudeSystemMessage array
+  const systemTexts = arr
+    .filter((msg) => msg && (msg as any).type === 'text')
+    .map((msg) => (msg as any).text)
+    .filter((t) => typeof t === 'string' && t.length > 0);
 
   return systemTexts.length > 0 ? systemTexts.join('\n') : null;
 }

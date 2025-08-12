@@ -341,6 +341,21 @@ async function handleClaudeToOpenAI(
 
     // Convert Claude request to OpenAI format
     const openAIRequest = convertClaudeToOpenAI(claudeRequest);
+    if (!openAIRequest) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'Invalid Claude request: conversion failed',
+            type: 'invalid_request_error',
+            details: { note: 'Please check required fields: model, messages, max_tokens' },
+          },
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
     // Prepare headers for OpenAI API
     const headers = new Headers();
@@ -360,6 +375,37 @@ async function handleClaudeToOpenAI(
       headers: headers,
       body: JSON.stringify(openAIRequest),
     });
+
+    // Inspect Content-Type to detect non-JSON/HTML responses (e.g., login/SPA pages)
+    const contentType = openAIResponse.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      const html = await openAIResponse.text();
+      const textPreview = html.slice(0, 500);
+      const isGPTLoadPage = /<title>\s*GPT\s+Load\s*<\/title>/i.test(html) || /id="app"/.test(html);
+      const suggestion = isGPTLoadPage
+        ? '检查 OPENAI_BASE_URL 是否指向了网站前端而非 API 域名；确认无登录重定向；在服务器侧直连官方 API 或正确的反代路径（/v1/...）。'
+        : '收到 HTML 而非 JSON。请检查网关/反代是否将请求重定向到登录或前端页；确认 Authorization 头与 BASE_URL 正确。';
+
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'Non-JSON HTML response received from upstream OpenAI endpoint',
+            type: 'invalid_content_type',
+            upstream: {
+              status: openAIResponse.status,
+              statusText: openAIResponse.statusText,
+              contentType,
+              textPreview,
+            },
+            possible_cause: isGPTLoadPage
+              ? '请求被路由到一个前端应用（如“GPT Load”页），通常是反代/域名配置错误或需要登录的页面'
+              : '反代/网关返回了 HTML（可能是登录/跳转/错误页）',
+            suggestion,
+          },
+        }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Check if response is an error
     if (!openAIResponse.ok) {
@@ -390,6 +436,24 @@ async function handleClaudeToOpenAI(
 
     // Handle response based on stream mode
     if (isStream && openAIResponse.body) {
+      // For stream, ensure upstream is SSE
+      if (!contentType.includes('text/event-stream')) {
+        // Some upstreams may still send JSON errors with 200; handle as error
+        const text = await openAIResponse.text();
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: 'Expected text/event-stream for streaming response but received different content type',
+              type: 'invalid_content_type',
+              upstream: { contentType, status: openAIResponse.status },
+              textPreview: text.slice(0, 500),
+              suggestion: '确认已使用 stream:true 且上游返回了 SSE。若经反代，请配置不缓存且不改写 Content-Type。',
+            },
+          }),
+          { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
       // Transform OpenAI SSE to Claude format
       const transformedStream = openAIResponse.body.pipeThrough(createOpenAIToClaudeTransform());
 
@@ -403,7 +467,23 @@ async function handleClaudeToOpenAI(
         },
       });
     } else {
-      // Convert non-streaming response
+      // Convert non-streaming response (expect JSON)
+      if (!contentType.includes('application/json')) {
+        const text = await openAIResponse.text();
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "Expected application/json but received different content type from upstream",
+              type: 'invalid_content_type',
+              upstream: { contentType, status: openAIResponse.status },
+              textPreview: text.slice(0, 500),
+              suggestion: '确认调用的是 /v1/chat/completions API，且未被反代改写为 HTML/文本。',
+            },
+          }),
+          { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
       let openAIData;
       try {
         openAIData = await openAIResponse.json();
