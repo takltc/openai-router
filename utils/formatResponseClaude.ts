@@ -402,8 +402,16 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
         state.usage!.output_tokens = event.usage.output_tokens;
       }
 
-      // Send finish reason
+      // Send finish reason (handle null stop_reason by checking for completion indicators)
       const hasToolUse = state.currentToolCall !== undefined;
+      let finishReason = mapStopReasonToFinishReason(event.delta.stop_reason, hasToolUse);
+      
+      // If stop_reason is null but we have usage data, assume end_turn
+      if (!finishReason && event.usage) {
+        finishReason = hasToolUse ? 'tool_calls' : 'stop';
+        console.log('Claude to OpenAI: Null stop_reason with usage data, defaulting to:', finishReason);
+      }
+      
       const chunk: OpenAIStreamChunk = {
         id: state.messageId,
         object: 'chat.completion.chunk',
@@ -413,9 +421,16 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
           {
             index: 0,
             delta: {},
-            finish_reason: mapStopReasonToFinishReason(event.delta.stop_reason, hasToolUse),
+            finish_reason: finishReason,
           },
         ],
+        usage: state.usage
+          ? {
+              prompt_tokens: state.usage.input_tokens,
+              completion_tokens: state.usage.output_tokens,
+              total_tokens: state.usage.input_tokens + state.usage.output_tokens,
+            }
+          : undefined,
       };
       return chunk;
     }
@@ -479,7 +494,18 @@ export function parseAndConvertStreamChunk(
     const chunk = formatStreamChunkClaude(claudeEvent, state);
     return { chunk, updatedState: state };
   } catch (error) {
-    console.error('Failed to parse Claude stream event:', error);
+    console.error('Failed to parse Claude stream event:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      eventSummary: {
+        dataLength: sseData.length,
+        dataPreview: sseData.substring(0, 200),
+        state: {
+          messageId: state.messageId,
+          model: state.model
+        }
+      }
+    });
     return { chunk: null, updatedState: state };
   }
 }

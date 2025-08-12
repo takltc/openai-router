@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { OpenAIStreamChunk, ClaudeStreamEvent, StreamConversionState } from './types';
 import { convertOpenAIChunkToClaude, createOpenAIToClaudeTransform } from './streamResponseOpenAI';
 import { convertClaudeEventToOpenAI, createClaudeToOpenAITransform } from './streamResponseClaude';
-import { parseSSE, enqueueSSE, createDoneMessage, isDoneMessage } from './sse';
+import { parseSSE, enqueueSSE, createDoneMessage, isDoneMessage, parseIncompleteSSE } from './sse';
 
 describe('SSE utilities', () => {
   it('should parse SSE messages correctly', () => {
@@ -44,6 +44,38 @@ describe('SSE utilities', () => {
     expect(parsed).not.toBeNull();
     if (parsed) {
       expect(isDoneMessage(parsed)).toBe(true);
+    }
+  });
+
+  it('should parse [DONE] message without JSON errors', () => {
+    // 这个测试确保[DONE]消息不会产生JSON解析错误
+    const sseString = 'data: [DONE]\n\n';
+    const parsed = parseSSE(sseString);
+    
+    expect(parsed).not.toBeNull();
+    expect(parsed?.data).toBe('[DONE]');
+    expect(isDoneMessage(parsed!)).toBe(true);
+  });
+
+  it('should handle incomplete [DONE] message', () => {
+    // 测试缺少换行符的[DONE]消息
+    const incompleteSSE = 'data: [DONE]';
+    const parsed = parseIncompleteSSE(incompleteSSE);
+    
+    expect(parsed).not.toBeNull();
+    expect(parsed?.data).toBe('[DONE]');
+    expect(isDoneMessage(parsed!)).toBe(true);
+  });
+
+  it('should handle special SSE markers correctly', () => {
+    const specialMarkers = ['[DONE]', 'ping', 'heartbeat'];
+    
+    for (const marker of specialMarkers) {
+      const sseString = `data: ${marker}\n\n`;
+      const parsed = parseSSE(sseString);
+      
+      expect(parsed).not.toBeNull();
+      expect(parsed?.data).toBe(marker);
     }
   });
 });

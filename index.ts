@@ -63,7 +63,12 @@ export default {
         });
       }
     } catch (error) {
-      console.error('Error processing request:', error);
+      console.error('Error processing request:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        url: url.pathname,
+        method: request.method
+      });
       return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
         status: 500,
         headers: {
@@ -157,12 +162,29 @@ async function handleOpenAIToClaude(
   corsHeaders: Record<string, string>
 ): Promise<Response> {
   try {
+    console.log('=== OpenAI to Claude Request Start ===');
     // Parse request body
-    const openAIRequest = await request.json();
+    let openAIRequest;
+    try {
+      openAIRequest = await request.json();
+    } catch (parseError) {
+      console.error('Failed to parse OpenAI request JSON:', {
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        stack: parseError instanceof Error ? parseError.stack : undefined,
+        requestSummary: {
+          method: request.method,
+          url: request.url,
+          headers: Object.fromEntries(request.headers.entries())
+        }
+      });
+      throw new Error('Invalid JSON request body');
+    }
     const isStream = openAIRequest.stream === true;
+    console.log('Request parsed:', { isStream, model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
 
     // Convert OpenAI request to Claude format
     const claudeRequest = formatRequestClaude(openAIRequest);
+    console.log('Claude request formatted:', { stream: claudeRequest.stream, model: claudeRequest.model });
 
     // Prepare headers for Claude API
     const headers = new Headers();
@@ -179,6 +201,7 @@ async function handleOpenAIToClaude(
       headers.set('x-api-key', env.ANTHROPIC_API_KEY);
     }
 
+    console.log('Sending request to Claude API:', env.ANTHROPIC_BASE_URL);
     // Forward to Claude API
     const claudeResponse = await fetch(`${env.ANTHROPIC_BASE_URL}/messages`, {
       method: 'POST',
@@ -186,10 +209,29 @@ async function handleOpenAIToClaude(
       body: JSON.stringify(claudeRequest),
     });
 
+    console.log('Claude API response status:', claudeResponse.status, claudeResponse.statusText);
+    console.log('Claude API response headers:', Object.fromEntries(claudeResponse.headers.entries()));
+
     // Check if response is an error
     if (!claudeResponse.ok) {
+      console.error('Claude API error response:', claudeResponse.status);
       // Return error response directly without format conversion
-      const errorData = await claudeResponse.json();
+      let errorData;
+      try {
+        errorData = await claudeResponse.json();
+      } catch (parseError) {
+        console.error('Failed to parse Claude error response JSON:', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          stack: parseError instanceof Error ? parseError.stack : undefined,
+          responseSummary: {
+            status: claudeResponse.status,
+            statusText: claudeResponse.statusText,
+            headers: Object.fromEntries(claudeResponse.headers.entries())
+          }
+        });
+        errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
+      }
+      console.error('Claude API error data:', errorData);
       return new Response(JSON.stringify(errorData), {
         status: claudeResponse.status,
         headers: {
@@ -201,9 +243,11 @@ async function handleOpenAIToClaude(
 
     // Handle response based on stream mode
     if (isStream && claudeResponse.body) {
+      console.log('=== Starting Claude to OpenAI Stream Conversion ===');
       // Transform Claude SSE to OpenAI format
       const transformedStream = claudeResponse.body.pipeThrough(createClaudeToOpenAITransform());
 
+      console.log('Stream transformation created, returning response');
       return new Response(transformedStream, {
         status: claudeResponse.status,
         headers: {
@@ -215,7 +259,21 @@ async function handleOpenAIToClaude(
       });
     } else {
       // Convert non-streaming response
-      const claudeData = await claudeResponse.json();
+      let claudeData;
+      try {
+        claudeData = await claudeResponse.json();
+      } catch (parseError) {
+        console.error('Failed to parse Claude response JSON:', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          stack: parseError instanceof Error ? parseError.stack : undefined,
+          responseSummary: {
+            status: claudeResponse.status,
+            statusText: claudeResponse.statusText,
+            headers: Object.fromEntries(claudeResponse.headers.entries())
+          }
+        });
+        throw new Error('Failed to parse Claude API response');
+      }
       const openAIResponse = formatResponseClaude(claudeData);
 
       return new Response(JSON.stringify(openAIResponse), {
@@ -227,7 +285,15 @@ async function handleOpenAIToClaude(
       });
     }
   } catch (error) {
-    console.error('Error in OpenAI to Claude conversion:', error);
+    console.error('Error in OpenAI to Claude conversion:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      requestSummary: {
+        method: request.method,
+        url: request.url,
+        headers: Object.fromEntries(request.headers.entries())
+      }
+    });
     return new Response(
       JSON.stringify({
         error: {
@@ -256,7 +322,21 @@ async function handleClaudeToOpenAI(
 ): Promise<Response> {
   try {
     // Parse request body
-    const claudeRequest = await request.json();
+    let claudeRequest;
+    try {
+      claudeRequest = await request.json();
+    } catch (parseError) {
+      console.error('Failed to parse Claude request JSON:', {
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        stack: parseError instanceof Error ? parseError.stack : undefined,
+        requestSummary: {
+          method: request.method,
+          url: request.url,
+          headers: Object.fromEntries(request.headers.entries())
+        }
+      });
+      throw new Error('Invalid JSON request body');
+    }
     const isStream = claudeRequest.stream === true;
 
     // Convert Claude request to OpenAI format
@@ -284,7 +364,21 @@ async function handleClaudeToOpenAI(
     // Check if response is an error
     if (!openAIResponse.ok) {
       // Return error response directly without format conversion
-      const errorData = await openAIResponse.json();
+      let errorData;
+      try {
+        errorData = await openAIResponse.json();
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI error response JSON:', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          stack: parseError instanceof Error ? parseError.stack : undefined,
+          responseSummary: {
+            status: openAIResponse.status,
+            statusText: openAIResponse.statusText,
+            headers: Object.fromEntries(openAIResponse.headers.entries())
+          }
+        });
+        errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
+      }
       return new Response(JSON.stringify(errorData), {
         status: openAIResponse.status,
         headers: {
@@ -310,7 +404,21 @@ async function handleClaudeToOpenAI(
       });
     } else {
       // Convert non-streaming response
-      const openAIData = await openAIResponse.json();
+      let openAIData;
+      try {
+        openAIData = await openAIResponse.json();
+      } catch (parseError) {
+        console.error('Failed to parse OpenAI response JSON:', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          stack: parseError instanceof Error ? parseError.stack : undefined,
+          responseSummary: {
+            status: openAIResponse.status,
+            statusText: openAIResponse.statusText,
+            headers: Object.fromEntries(openAIResponse.headers.entries())
+          }
+        });
+        throw new Error('Failed to parse OpenAI API response');
+      }
       const claudeResponse = formatResponseOpenAI(openAIData);
 
       return new Response(JSON.stringify(claudeResponse), {
@@ -322,7 +430,15 @@ async function handleClaudeToOpenAI(
       });
     }
   } catch (error) {
-    console.error('Error in Claude to OpenAI conversion:', error);
+    console.error('Error in Claude to OpenAI conversion:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      requestSummary: {
+        method: request.method,
+        url: request.url,
+        headers: Object.fromEntries(request.headers.entries())
+      }
+    });
     return new Response(
       JSON.stringify({
         error: {

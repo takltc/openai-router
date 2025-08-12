@@ -15,7 +15,7 @@ import type {
   ClaudeStreamMessageStop,
   StreamConversionState,
 } from './types';
-import { enqueueSSE, parseSSE, isDoneMessage, createDoneMessage } from './sse';
+import { enqueueSSE, parseSSE, isDoneMessage, createDoneMessage, parseIncompleteSSE, enqueueErrorAndDone } from './sse';
 
 /**
  * Convert OpenAI stream chunk to Claude stream events
@@ -243,9 +243,16 @@ export function transformOpenAIStreamToClaude(
           }
         }
 
-        // Process any remaining buffer
+        // Process any remaining buffer with enhanced parsing
         if (buffer.trim()) {
-          const parsed = parseSSE(buffer);
+          let parsed = parseSSE(buffer);
+          
+          // If normal parsing fails, try parsing incomplete SSE data
+          if (!parsed) {
+            console.log('OpenAI Stream: Normal parsing failed, trying incomplete parsing');
+            parsed = parseIncompleteSSE(buffer);
+          }
+          
           if (parsed && !isDoneMessage(parsed)) {
             const chunk = parsed.data as OpenAIStreamChunk;
             if (chunk && typeof chunk === 'object') {
@@ -256,13 +263,33 @@ export function transformOpenAIStreamToClaude(
                   data: JSON.stringify(event),
                 });
               }
+              
+              // Check if this is a completion event that needs to trigger a finish
+              const hasFinish = events.some(e => e.type === 'message_stop');
+              if (!hasFinish) {
+                // If we have a finish_reason in the chunk but didn't generate message_stop, force it
+                const hasFinishReason = chunk.choices?.some(choice => choice.finish_reason);
+                if (hasFinishReason) {
+                  console.log('OpenAI Stream: Force generating message_stop from remaining buffer');
+                  const messageStop: ClaudeStreamMessageStop = {
+                    type: 'message_stop',
+                  };
+                  enqueueSSE(controller, {
+                    event: messageStop.type,
+                    data: JSON.stringify(messageStop),
+                  });
+                }
+              }
             }
           }
         }
 
         controller.close();
       } catch (error) {
-        controller.error(error);
+        console.error('OpenAI Stream: Error occurred, sending error message and closing:', error);
+        // Send error message instead of just erroring the controller
+        enqueueErrorAndDone(controller, error);
+        controller.close();
       } finally {
         reader.releaseLock();
       }
@@ -352,17 +379,43 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
     },
 
     flush(controller) {
+      console.log('OpenAI Transform: Flush called with buffer:', buffer.substring(0, 100));
+      
       if (buffer.trim()) {
-        const parsed = parseSSE(buffer);
+        let parsed = parseSSE(buffer);
+        
+        // If normal parsing fails, try parsing incomplete SSE data
+        if (!parsed) {
+          console.log('OpenAI Transform: Normal parsing failed in flush, trying incomplete parsing');
+          parsed = parseIncompleteSSE(buffer);
+        }
+        
         if (parsed && !isDoneMessage(parsed)) {
           const openAIChunk = parsed.data as OpenAIStreamChunk;
           if (openAIChunk && typeof openAIChunk === 'object') {
+            console.log('OpenAI Transform: Processing chunk from flush buffer');
             const events = convertOpenAIChunkToClaude(openAIChunk, state);
             for (const event of events) {
               const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
               controller.enqueue(encoder.encode(sseMessage));
             }
+            
+            // Check if we need to force generate message_stop for completion
+            const hasFinish = events.some(e => e.type === 'message_stop');
+            if (!hasFinish) {
+              const hasFinishReason = openAIChunk.choices?.some(choice => choice.finish_reason);
+              if (hasFinishReason) {
+                console.log('OpenAI Transform: Force generating message_stop from flush');
+                const messageStop: ClaudeStreamMessageStop = {
+                  type: 'message_stop',
+                };
+                const sseMessage = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
+                controller.enqueue(encoder.encode(sseMessage));
+              }
+            }
           }
+        } else {
+          console.log('OpenAI Transform: No valid data in flush buffer');
         }
       }
     },

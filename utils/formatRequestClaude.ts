@@ -144,11 +144,26 @@ function convertMessageContent(
 
       // Add tool use content
       for (const toolCall of toolCalls) {
+        let toolInput;
+        try {
+          toolInput = JSON.parse(toolCall.function.arguments);
+        } catch (parseError) {
+          console.error('Failed to parse tool call arguments in convertMessageContent (array):', {
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+            stack: parseError instanceof Error ? parseError.stack : undefined,
+            toolCallSummary: {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
+            }
+          });
+          toolInput = {};
+        }
         const toolUse: ClaudeToolUseContent = {
           type: 'tool_use',
           id: toolCall.id,
           name: toolCall.function.name,
-          input: JSON.parse(toolCall.function.arguments),
+          input: toolInput,
         };
         claudeContent.push(toolUse);
       }
@@ -189,11 +204,26 @@ function convertMessageContent(
   // Add tool calls if present (regardless of content being null/undefined/array)
   if (toolCalls && toolCalls.length > 0) {
     for (const toolCall of toolCalls) {
+      let toolInput;
+      try {
+        toolInput = JSON.parse(toolCall.function.arguments);
+      } catch (parseError) {
+        console.error('Failed to parse tool call arguments in convertMessageContent (toolCalls):', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          stack: parseError instanceof Error ? parseError.stack : undefined,
+          toolCallSummary: {
+            id: toolCall.id,
+            name: toolCall.function.name,
+            argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
+          }
+        });
+        toolInput = {};
+      }
       const toolUse: ClaudeToolUseContent = {
         type: 'tool_use',
         id: toolCall.id,
         name: toolCall.function.name,
-        input: JSON.parse(toolCall.function.arguments),
+        input: toolInput,
       };
       claudeContent.push(toolUse);
     }
@@ -247,7 +277,21 @@ function convertMessage(message: OpenAIMessage): ClaudeMessage | null {
       type: 'tool_use',
       id: `func_${Date.now()}`,
       name: message.function_call.name,
-      input: JSON.parse(message.function_call.arguments),
+      input: (() => {
+        try {
+          return JSON.parse(message.function_call.arguments);
+        } catch (parseError) {
+          console.error('Failed to parse function call arguments in convertMessage:', {
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+            stack: parseError instanceof Error ? parseError.stack : undefined,
+            functionCallSummary: {
+              name: message.function_call.name,
+              argumentsPreview: message.function_call.arguments?.substring(0, 200) || ''
+            }
+          });
+          return {};
+        }
+      })(),
     };
 
     const content: ClaudeContent[] = [];

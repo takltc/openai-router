@@ -52,6 +52,11 @@ export function enqueueSSE(
  * @returns Parsed SSE message or null if invalid
  */
 export function parseSSE(sseString: string): ParsedSSEMessage | null {
+  // Handle empty or whitespace-only strings
+  if (!sseString || !sseString.trim()) {
+    return null;
+  }
+
   const lines = sseString.trim().split('\n');
   const message: ParsedSSEMessage = {
     data: '',
@@ -63,7 +68,8 @@ export function parseSSE(sseString: string): ParsedSSEMessage | null {
     if (line.startsWith('event:')) {
       message.event = line.slice(6).trim();
     } else if (line.startsWith('data:')) {
-      dataLines.push(line.slice(5).trim());
+      const dataContent = line.slice(5).trim();
+      dataLines.push(dataContent);
     } else if (line.startsWith('id:')) {
       message.id = line.slice(3).trim();
     } else if (line.startsWith('retry:')) {
@@ -73,21 +79,118 @@ export function parseSSE(sseString: string): ParsedSSEMessage | null {
       }
     }
   }
-
+  
+  // Allow events without data (like ping or certain control events)
   if (dataLines.length === 0) {
-    return null;
+    // If there's at least an event field, still return a valid message
+    if (message.event) {
+      console.log('SSE: Event without data detected:', message.event);
+      message.data = null;
+      return message;
+    } else {
+      console.log('WARNING: SSE message with no event and no data, dropping:', JSON.stringify(sseString));
+      return null;
+    }
   }
 
   // Join data lines and try to parse as JSON
   const dataString = dataLines.join('\n');
+  
+  // Handle special SSE markers that should remain as strings
+  const specialMarkers = ['[DONE]', 'ping', 'heartbeat'];
+  if (specialMarkers.includes(dataString.trim())) {
+    message.data = dataString;
+    return message;
+  }
+  
   try {
     message.data = JSON.parse(dataString);
-  } catch {
+  } catch (e) {
     // If not valid JSON, keep as string
     message.data = dataString;
+    // Only log JSON parse errors for non-empty data that's not a known special marker
+    if (dataString.trim() && !dataString.startsWith('[') && !dataString.endsWith(']')) {
+      console.log('SSE: Failed to parse JSON, keeping as string:', {
+        error: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+        eventSummary: {
+          dataLength: dataString.length,
+          dataPreview: dataString.substring(0, 100),
+          event: message.event || 'no-event'
+        }
+      });
+    }
   }
 
   return message;
+}
+
+/**
+ * Try to parse incomplete SSE data that may be missing trailing newlines
+ * Used in flush scenarios where the last chunk may be incomplete
+ * @param incompleteData - Potentially incomplete SSE data
+ * @returns Parsed SSE message or null if invalid
+ */
+export function parseIncompleteSSE(incompleteData: string): ParsedSSEMessage | null {
+  if (!incompleteData || !incompleteData.trim()) {
+    return null;
+  }
+
+  // If the data doesn't end with a newline, add one for parsing
+  let dataToProcess = incompleteData;
+  if (!dataToProcess.endsWith('\n')) {
+    dataToProcess += '\n';
+  }
+
+  // Try to parse as normal SSE
+  const parsed = parseSSE(dataToProcess);
+  if (parsed) {
+    console.log('SSE: Successfully parsed incomplete data:', incompleteData.substring(0, 100));
+    return parsed;
+  }
+
+  // If normal parsing fails, try to extract just the data content
+  const lines = incompleteData.split('\n').filter(line => line.trim());
+  for (const line of lines) {
+    if (line.startsWith('data:')) {
+      const dataContent = line.slice(5).trim();
+      if (dataContent) {
+        console.log('SSE: Extracted data from incomplete SSE:', dataContent.substring(0, 100));
+        
+        // Handle special SSE markers
+        const specialMarkers = ['[DONE]', 'ping', 'heartbeat'];
+        if (specialMarkers.includes(dataContent.trim())) {
+          return {
+            data: dataContent,
+          };
+        }
+        
+        try {
+          return {
+            data: JSON.parse(dataContent),
+          };
+        } catch (e) {
+          // Only log errors for non-special markers
+          if (!dataContent.startsWith('[') || !dataContent.endsWith(']')) {
+            console.log('SSE: Failed to parse incomplete data JSON:', {
+              error: e instanceof Error ? e.message : String(e),
+              stack: e instanceof Error ? e.stack : undefined,
+              eventSummary: {
+                dataLength: dataContent.length,
+                dataPreview: dataContent.substring(0, 100)
+              }
+            });
+          }
+          return {
+            data: dataContent,
+          };
+        }
+      }
+    }
+  }
+
+  console.log('SSE: Failed to parse incomplete data:', incompleteData.substring(0, 100));
+  return null;
 }
 
 /**
@@ -119,9 +222,19 @@ export function createSSEParser(): TransformStream<Uint8Array, ParsedSSEMessage>
     flush(controller) {
       // Process any remaining data in the buffer
       if (buffer.trim()) {
-        const parsed = parseSSE(buffer);
+        // Try normal parsing first
+        let parsed = parseSSE(buffer);
+        
+        // If normal parsing fails, try parsing incomplete SSE data
+        if (!parsed) {
+          console.log('SSE: Normal parsing failed in flush, trying incomplete parsing');
+          parsed = parseIncompleteSSE(buffer);
+        }
+        
         if (parsed) {
           controller.enqueue(parsed);
+        } else {
+          console.log('SSE: Failed to parse buffer in flush:', buffer.substring(0, 100));
         }
       }
     },
@@ -212,4 +325,54 @@ export function createDoneMessage(): SSEMessage {
  */
 export function isDoneMessage(message: ParsedSSEMessage): boolean {
   return message.data === '[DONE]';
+}
+
+/**
+ * Create an error SSE message
+ * @param error - Error object or message
+ * @returns SSE message containing error information
+ */
+export function createErrorMessage(error: any): SSEMessage {
+  const errorData = {
+    type: 'error',
+    error: {
+      type: error?.type || 'stream_error',
+      message: error?.message || 'An error occurred during streaming',
+    },
+  };
+  
+  return {
+    data: JSON.stringify(errorData),
+  };
+}
+
+/**
+ * Safely enqueue error message and done message
+ * Used as fallback when stream errors occur
+ * @param controller - Stream controller
+ * @param error - Error that occurred
+ */
+export function enqueueErrorAndDone(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  error: any
+): void {
+  try {
+    // Enqueue error message first
+    const errorMessage = createErrorMessage(error);
+    enqueueSSE(controller, errorMessage);
+    
+    // Then enqueue done message to terminate stream properly
+    const doneMessage = createDoneMessage();
+    enqueueSSE(controller, doneMessage);
+    
+    console.log('SSE: Error and DONE messages enqueued successfully');
+  } catch (enqueueError) {
+    console.error('SSE: Failed to enqueue error/done messages:', enqueueError);
+    // Try to close the controller as last resort
+    try {
+      controller.close();
+    } catch (closeError) {
+      console.error('SSE: Failed to close controller:', closeError);
+    }
+  }
 }

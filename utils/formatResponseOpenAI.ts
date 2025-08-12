@@ -171,7 +171,15 @@ function convertToolCalls(toolCalls: OpenAIToolCall[]): ClaudeToolUseContent[] {
         input,
       });
     } catch (error) {
-      console.error('Failed to parse tool call arguments:', error);
+      console.error('Failed to parse tool call arguments:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        toolCallSummary: {
+          id: toolCall.id,
+          name: toolCall.function.name,
+          argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
+        }
+      });
       // Create with empty input if parsing fails
       claudeToolUses.push({
         type: 'tool_use',
@@ -237,7 +245,14 @@ function convertMessageContent(
         input,
       });
     } catch (error) {
-      console.error('Failed to parse function call arguments:', error);
+      console.error('Failed to parse function call arguments:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        functionCallSummary: {
+          name: functionCall.name,
+          argumentsPreview: functionCall.arguments?.substring(0, 200) || ''
+        }
+      });
       claudeContent.push({
         type: 'tool_use',
         id: `call_${Date.now()}`,
@@ -504,9 +519,12 @@ export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeS
     }
   }
 
-  // Handle finish reason
+  // Handle finish reason or detect end conditions
   const finishReason = chunk.choices[0]?.finish_reason;
-  if (finishReason) {
+  const hasUsage = !!chunk.usage;
+  const isLastChunk = finishReason || hasUsage;
+  
+  if (finishReason || isLastChunk) {
     // Close any open content blocks
     if (state.currentContent || state.currentToolCall) {
       const blockStop: ClaudeStreamContentBlockStop = {
@@ -519,11 +537,12 @@ export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeS
       state.currentToolCall = undefined;
     }
 
-    // Send message delta with stop reason
+    // Send message delta with stop reason (default to 'end_turn' if null)
+    const stopReason = mapFinishReasonToStopReason(finishReason) || 'end_turn';
     const messageDelta: ClaudeStreamMessageDelta = {
       type: 'message_delta',
       delta: {
-        stop_reason: mapFinishReasonToStopReason(finishReason) || 'end_turn',
+        stop_reason: stopReason,
         stop_sequence: null,
       },
       usage: {
@@ -537,6 +556,13 @@ export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeS
       type: 'message_stop',
     };
     events.push(messageStop);
+    
+    console.log('OpenAI to Claude: Message completion detected', {
+      finishReason,
+      hasUsage,
+      stopReason,
+      isLastChunk
+    });
   }
 
   return events.length > 0 ? events : null;
@@ -573,7 +599,19 @@ export function parseAndConvertOpenAIStreamChunk(
     const events = formatStreamChunkOpenAI(openAIChunk, state);
     return { events, updatedState: state };
   } catch (error) {
-    console.error('Failed to parse OpenAI stream chunk:', error);
+    console.error('Failed to parse OpenAI stream chunk:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      eventSummary: {
+        dataLength: sseData.length,
+        dataPreview: sseData.substring(0, 200),
+        state: {
+          messageId: state.messageId,
+          model: state.model,
+          hasStarted: state.hasStarted
+        }
+      }
+    });
     return { events: null, updatedState: state };
   }
 }
