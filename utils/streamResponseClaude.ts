@@ -224,6 +224,7 @@ export function transformClaudeStreamToOpenAI(
     messageId: '',
     created: 0,
     model: '',
+    contentBlockStarted: false,
   };
 
   return new ReadableStream({
@@ -448,6 +449,7 @@ export function createClaudeToOpenAITransform(): TransformStream<Uint8Array, Uin
     messageId: '',
     created: 0,
     model: '',
+    contentBlockStarted: false,
   };
 
   const decoder = new TextDecoder();

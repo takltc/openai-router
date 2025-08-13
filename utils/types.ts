@@ -455,6 +455,7 @@ export interface StreamConversionState {
     input_tokens: number;
     output_tokens: number;
   };
+  contentBlockStarted?: boolean;
 }
 
 /**

@@ -436,8 +436,13 @@ async function handleClaudeToOpenAI(
 
     // Handle response based on stream mode
     if (isStream && openAIResponse.body) {
+      console.log('=== Starting OpenAI to Claude Stream Conversion ===');
+      console.log('OpenAI response status:', openAIResponse.status);
+      console.log('OpenAI response headers:', Object.fromEntries(openAIResponse.headers.entries()));
+      
       // For stream, ensure upstream is SSE
       if (!contentType.includes('text/event-stream')) {
+        console.error('ERROR: Expected SSE but got:', contentType);
         // Some upstreams may still send JSON errors with 200; handle as error
         const text = await openAIResponse.text();
         return new Response(
@@ -454,10 +459,12 @@ async function handleClaudeToOpenAI(
         );
       }
 
+      console.log('Creating OpenAI to Claude transform stream...');
       // Transform OpenAI SSE to Claude format
       const transformedStream = openAIResponse.body.pipeThrough(createOpenAIToClaudeTransform());
+      console.log('Transform stream created, returning response');
 
-      return new Response(transformedStream, {
+      const response = new Response(transformedStream, {
         status: openAIResponse.status,
         headers: {
           ...corsHeaders,
@@ -466,6 +473,8 @@ async function handleClaudeToOpenAI(
           Connection: 'keep-alive',
         },
       });
+      console.log('OpenAI to Claude stream response created and being returned');
+      return response;
     } else {
       // Convert non-streaming response (expect JSON)
       if (!contentType.includes('application/json')) {

@@ -392,7 +392,8 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
     }
 
     case 'content_block_stop': {
-      // Content block completed, no action needed
+      // 重置 contentBlockStarted 状态，因为当前块已经结束，可能是工具调用导致
+      state.contentBlockStarted = false;
       return null;
     }
 
@@ -457,6 +458,8 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
             }
           : undefined,
       };
+      // 重置 contentBlockStarted 状态，避免状态泄漏到下一条消息
+      state.contentBlockStarted = false;
       return chunk;
     }
 

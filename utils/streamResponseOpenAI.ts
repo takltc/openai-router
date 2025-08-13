@@ -60,8 +60,8 @@ export function convertOpenAIChunkToClaude(
 
     // Handle content
     if (delta.content !== undefined) {
-      // If this is the first content, send content_block_start
-      if (!state.currentToolCall) {
+      // If this is the first content block, send content_block_start
+      if (!state.contentBlockStarted) {
         const blockStart: ClaudeStreamContentBlockStart = {
           type: 'content_block_start',
           index: 0,
@@ -71,6 +71,7 @@ export function convertOpenAIChunkToClaude(
           },
         };
         events.push(blockStart);
+        state.contentBlockStarted = true;
       }
 
       // Send content delta
@@ -93,6 +94,15 @@ export function convertOpenAIChunkToClaude(
         // Start a new tool call
         if (toolCall.id) {
           // Close previous content block if exists
+          if (state.contentBlockStarted) {
+            const blockStop: ClaudeStreamContentBlockStop = {
+              type: 'content_block_stop',
+              index: 0,
+            };
+            events.push(blockStop);
+            state.contentBlockStarted = false;
+          }
+          // Close previous tool call if exists
           if (state.currentToolCall) {
             const blockStop: ClaudeStreamContentBlockStop = {
               type: 'content_block_stop',
@@ -142,12 +152,22 @@ export function convertOpenAIChunkToClaude(
     // Handle finish reason
     if (choice.finish_reason) {
       // Close any open content blocks
-      if (state.currentToolCall || delta.content !== undefined) {
+      if (state.contentBlockStarted) {
         const blockStop: ClaudeStreamContentBlockStop = {
           type: 'content_block_stop',
           index: 0,
         };
         events.push(blockStop);
+        state.contentBlockStarted = false;
+      }
+      // Close any open tool calls
+      if (state.currentToolCall) {
+        const blockStop: ClaudeStreamContentBlockStop = {
+          type: 'content_block_stop',
+          index: 0,
+        };
+        events.push(blockStop);
+        state.currentToolCall = undefined;
       }
 
       // Send message delta with stop reason
@@ -194,6 +214,7 @@ export function transformOpenAIStreamToClaude(
     messageId: '',
     created: 0,
     model: '',
+    contentBlockStarted: false,
   };
 
   return new ReadableStream({
@@ -344,44 +365,79 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
     messageId: '',
     created: 0,
     model: '',
+    contentBlockStarted: false,
   };
 
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
+  let chunkCount = 0;
+  let eventCount = 0;
+
+  console.log('=== OpenAI to Claude Transform Stream Created ===');
 
   return new TransformStream({
     transform(chunk: Uint8Array, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
+      chunkCount++;
+      const chunkText = decoder.decode(chunk, { stream: true });
+      console.log(`OpenAI Transform: Chunk #${chunkCount} received, size: ${chunk.length} bytes`);
+      console.log(`OpenAI Transform: Chunk preview: ${chunkText.substring(0, 200)}${chunkText.length > 200 ? '...' : ''}`);
+      
+      buffer += chunkText;
+      console.log(`OpenAI Transform: Buffer size after append: ${buffer.length}`);
+      
       const messages = buffer.split('\n\n');
       buffer = messages.pop() || '';
+      console.log(`OpenAI Transform: Split into ${messages.length} messages, remaining buffer: ${buffer.length} chars`);
 
       for (const message of messages) {
-        if (!message.trim()) continue;
+        if (!message.trim()) {
+          console.log('OpenAI Transform: Empty message, skipping');
+          continue;
+        }
 
+        console.log(`OpenAI Transform: Processing message: ${message.substring(0, 100)}`);
         const parsed = parseSSE(message);
-        if (!parsed) continue;
+        if (!parsed) {
+          console.log('OpenAI Transform: Failed to parse SSE message');
+          continue;
+        }
 
+        console.log('OpenAI Transform: Parsed SSE:', parsed);
         if (isDoneMessage(parsed)) {
+          console.log('OpenAI Transform: [DONE] message received');
           // Claude doesn't use [DONE]
           continue;
         }
 
         const openAIChunk = parsed.data as OpenAIStreamChunk;
-        if (!openAIChunk || typeof openAIChunk !== 'object') continue;
+        if (!openAIChunk || typeof openAIChunk !== 'object') {
+          console.log('OpenAI Transform: Invalid chunk data');
+          continue;
+        }
 
+        console.log('OpenAI Transform: Converting OpenAI chunk:', openAIChunk);
         const events = convertOpenAIChunkToClaude(openAIChunk, state);
+        console.log(`OpenAI Transform: Generated ${events.length} Claude events`);
+        
         for (const event of events) {
+          eventCount++;
           const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+          console.log(`OpenAI Transform: Sending event #${eventCount} (${event.type})`);
           controller.enqueue(encoder.encode(sseMessage));
         }
       }
     },
 
     flush(controller) {
-      console.log('OpenAI Transform: Flush called with buffer:', buffer.substring(0, 100));
+      console.log('=== OpenAI Transform: Flush called ===');
+      console.log(`OpenAI Transform: Total chunks processed: ${chunkCount}`);
+      console.log(`OpenAI Transform: Total events sent: ${eventCount}`);
+      console.log(`OpenAI Transform: Buffer length: ${buffer.length}`);
+      console.log(`OpenAI Transform: Buffer content: ${buffer.substring(0, 200)}${buffer.length > 200 ? '...' : ''}`);
       
       if (buffer.trim()) {
+        console.log('OpenAI Transform: Processing remaining buffer in flush');
         let parsed = parseSSE(buffer);
         
         // If normal parsing fails, try parsing incomplete SSE data
