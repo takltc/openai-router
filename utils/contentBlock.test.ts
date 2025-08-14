@@ -41,13 +41,13 @@ describe('OpenAI to Claude content block management', () => {
 
     // First chunk
     const events1 = convertOpenAIChunkToClaude(chunk1, state);
-    const startEvents1 = events1.filter(e => e.type === 'content_block_start');
+    const startEvents1 = events1.filter((e) => e.type === 'content_block_start');
     expect(startEvents1).toHaveLength(1);
     expect(state.contentBlockStarted).toBe(true);
 
     // Second chunk
     const events2 = convertOpenAIChunkToClaude(chunk2, state);
-    const startEvents2 = events2.filter(e => e.type === 'content_block_start');
+    const startEvents2 = events2.filter((e) => e.type === 'content_block_start');
     expect(startEvents2).toHaveLength(0);
     expect(state.contentBlockStarted).toBe(true);
   });
@@ -93,14 +93,14 @@ describe('OpenAI to Claude content block management', () => {
 
     // Content chunk
     const events1 = convertOpenAIChunkToClaude(contentChunk, state);
-    expect(events1.some(e => e.type === 'content_block_start')).toBe(true);
+    expect(events1.some((e) => e.type === 'content_block_start')).toBe(true);
     expect(state.contentBlockStarted).toBe(true);
 
     // Tool chunk
     const events2 = convertOpenAIChunkToClaude(toolChunk, state);
-    const stopContentEvent = events2.find(e => e.type === 'content_block_stop');
-    const startToolEvent = events2.find(e => e.type === 'content_block_start');
-    
+    const stopContentEvent = events2.find((e) => e.type === 'content_block_stop');
+    const startToolEvent = events2.find((e) => e.type === 'content_block_start');
+
     expect(stopContentEvent).toBeDefined();
     expect((stopContentEvent as any).index).toBe(0);
     expect(state.contentBlockStarted).toBe(false);
@@ -133,7 +133,7 @@ describe('OpenAI to Claude content block management', () => {
       model: 'gpt-4',
       choices: [{ index: 0, delta: { content: 'Paragraph 2.\n\n' }, finish_reason: null }],
     };
-    
+
     // Third segment with paragraph 3 and finish
     const chunk3: OpenAIStreamChunk = {
       id: 'chatcmpl-123',
@@ -153,28 +153,30 @@ describe('OpenAI to Claude content block management', () => {
 
     // Process chunks
     const events1 = convertOpenAIChunkToClaude(chunk1, state);
-    const startEvents1 = events1.filter(e => e.type === 'content_block_start');
+    const startEvents1 = events1.filter((e) => e.type === 'content_block_start');
     expect(startEvents1).toHaveLength(1); // Only one content_block_start
     expect(state.contentBlockStarted).toBe(true);
 
     const events2 = convertOpenAIChunkToClaude(chunk2, state);
-    const startEvents2 = events2.filter(e => e.type === 'content_block_start');
+    const startEvents2 = events2.filter((e) => e.type === 'content_block_start');
     expect(startEvents2).toHaveLength(0); // No new content_block_start
 
     const events3 = convertOpenAIChunkToClaude(chunk3, state);
-    const startEvents3 = events3.filter(e => e.type === 'content_block_start');
+    const startEvents3 = events3.filter((e) => e.type === 'content_block_start');
     expect(startEvents3).toHaveLength(0); // No new content_block_start
 
     // Verify text content is preserved
     const allEvents = [...events1, ...events2, ...events3];
-    const contentDeltaEvents = allEvents.filter(e => e.type === 'content_block_delta') as ClaudeStreamContentBlockDelta[];
-    const combinedText = contentDeltaEvents.map(e => (e.delta as { text: string }).text).join('');
+    const contentDeltaEvents = allEvents.filter(
+      (e) => e.type === 'content_block_delta'
+    ) as ClaudeStreamContentBlockDelta[];
+    const combinedText = contentDeltaEvents.map((e) => (e.delta as { text: string }).text).join('');
     expect(combinedText).toBe('Paragraph 1.\n\nParagraph 2.\n\nParagraph 3.');
 
     // Verify proper completion
     const eventsFinish = convertOpenAIChunkToClaude(finishChunk, state);
-    expect(eventsFinish.some(e => e.type === 'content_block_stop')).toBe(true);
-    expect(eventsFinish.some(e => e.type === 'message_stop')).toBe(true);
+    expect(eventsFinish.some((e) => e.type === 'content_block_stop')).toBe(true);
+    expect(eventsFinish.some((e) => e.type === 'message_stop')).toBe(true);
     expect(state.contentBlockStarted).toBe(false);
   });
 
@@ -195,12 +197,12 @@ describe('OpenAI to Claude content block management', () => {
     };
 
     const finishChunk: OpenAIStreamChunk = {
-        id: 'chatcmpl-123',
-        object: 'chat.completion.chunk',
-        created: 1234567890,
-        model: 'gpt-4',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      };
+      id: 'chatcmpl-123',
+      object: 'chat.completion.chunk',
+      created: 1234567890,
+      model: 'gpt-4',
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    };
 
     // Content chunk
     convertOpenAIChunkToClaude(contentChunk, state);
@@ -208,10 +210,9 @@ describe('OpenAI to Claude content block management', () => {
 
     // Finish chunk
     const events = convertOpenAIChunkToClaude(finishChunk, state);
-    const stopEvent = events.find(e => e.type === 'content_block_stop');
+    const stopEvent = events.find((e) => e.type === 'content_block_stop');
     expect(stopEvent).toBeDefined();
     expect(state.contentBlockStarted).toBe(false);
-    expect(events.some(e => e.type === 'message_stop')).toBe(true);
+    expect(events.some((e) => e.type === 'message_stop')).toBe(true);
   });
 });
-

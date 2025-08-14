@@ -15,7 +15,14 @@ import type {
   ClaudeStreamMessageStop,
   StreamConversionState,
 } from './types';
-import { enqueueSSE, parseSSE, isDoneMessage, createDoneMessage, parseIncompleteSSE, enqueueErrorAndDone } from './sse';
+import {
+  enqueueSSE,
+  parseSSE,
+  isDoneMessage,
+  createDoneMessage,
+  parseIncompleteSSE,
+  enqueueErrorAndDone,
+} from './sse';
 
 /**
  * Convert OpenAI stream chunk to Claude stream events
@@ -267,13 +274,13 @@ export function transformOpenAIStreamToClaude(
         // Process any remaining buffer with enhanced parsing
         if (buffer.trim()) {
           let parsed = parseSSE(buffer);
-          
+
           // If normal parsing fails, try parsing incomplete SSE data
           if (!parsed) {
             console.log('OpenAI Stream: Normal parsing failed, trying incomplete parsing');
             parsed = parseIncompleteSSE(buffer);
           }
-          
+
           if (parsed && !isDoneMessage(parsed)) {
             const chunk = parsed.data as OpenAIStreamChunk;
             if (chunk && typeof chunk === 'object') {
@@ -284,12 +291,12 @@ export function transformOpenAIStreamToClaude(
                   data: JSON.stringify(event),
                 });
               }
-              
+
               // Check if this is a completion event that needs to trigger a finish
-              const hasFinish = events.some(e => e.type === 'message_stop');
+              const hasFinish = events.some((e) => e.type === 'message_stop');
               if (!hasFinish) {
                 // If we have a finish_reason in the chunk but didn't generate message_stop, force it
-                const hasFinishReason = chunk.choices?.some(choice => choice.finish_reason);
+                const hasFinishReason = chunk.choices?.some((choice) => choice.finish_reason);
                 if (hasFinishReason) {
                   console.log('OpenAI Stream: Force generating message_stop from remaining buffer');
                   const messageStop: ClaudeStreamMessageStop = {
@@ -381,14 +388,18 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
       chunkCount++;
       const chunkText = decoder.decode(chunk, { stream: true });
       console.log(`OpenAI Transform: Chunk #${chunkCount} received, size: ${chunk.length} bytes`);
-      console.log(`OpenAI Transform: Chunk preview: ${chunkText.substring(0, 200)}${chunkText.length > 200 ? '...' : ''}`);
-      
+      console.log(
+        `OpenAI Transform: Chunk preview: ${chunkText.substring(0, 200)}${chunkText.length > 200 ? '...' : ''}`
+      );
+
       buffer += chunkText;
       console.log(`OpenAI Transform: Buffer size after append: ${buffer.length}`);
-      
+
       const messages = buffer.split('\n\n');
       buffer = messages.pop() || '';
-      console.log(`OpenAI Transform: Split into ${messages.length} messages, remaining buffer: ${buffer.length} chars`);
+      console.log(
+        `OpenAI Transform: Split into ${messages.length} messages, remaining buffer: ${buffer.length} chars`
+      );
 
       for (const message of messages) {
         if (!message.trim()) {
@@ -419,7 +430,7 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
         console.log('OpenAI Transform: Converting OpenAI chunk:', openAIChunk);
         const events = convertOpenAIChunkToClaude(openAIChunk, state);
         console.log(`OpenAI Transform: Generated ${events.length} Claude events`);
-        
+
         for (const event of events) {
           eventCount++;
           const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -434,18 +445,22 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
       console.log(`OpenAI Transform: Total chunks processed: ${chunkCount}`);
       console.log(`OpenAI Transform: Total events sent: ${eventCount}`);
       console.log(`OpenAI Transform: Buffer length: ${buffer.length}`);
-      console.log(`OpenAI Transform: Buffer content: ${buffer.substring(0, 200)}${buffer.length > 200 ? '...' : ''}`);
-      
+      console.log(
+        `OpenAI Transform: Buffer content: ${buffer.substring(0, 200)}${buffer.length > 200 ? '...' : ''}`
+      );
+
       if (buffer.trim()) {
         console.log('OpenAI Transform: Processing remaining buffer in flush');
         let parsed = parseSSE(buffer);
-        
+
         // If normal parsing fails, try parsing incomplete SSE data
         if (!parsed) {
-          console.log('OpenAI Transform: Normal parsing failed in flush, trying incomplete parsing');
+          console.log(
+            'OpenAI Transform: Normal parsing failed in flush, trying incomplete parsing'
+          );
           parsed = parseIncompleteSSE(buffer);
         }
-        
+
         if (parsed && !isDoneMessage(parsed)) {
           const openAIChunk = parsed.data as OpenAIStreamChunk;
           if (openAIChunk && typeof openAIChunk === 'object') {
@@ -455,11 +470,11 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
               const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
               controller.enqueue(encoder.encode(sseMessage));
             }
-            
+
             // Check if we need to force generate message_stop for completion
-            const hasFinish = events.some(e => e.type === 'message_stop');
+            const hasFinish = events.some((e) => e.type === 'message_stop');
             if (!hasFinish) {
-              const hasFinishReason = openAIChunk.choices?.some(choice => choice.finish_reason);
+              const hasFinishReason = openAIChunk.choices?.some((choice) => choice.finish_reason);
               if (hasFinishReason) {
                 console.log('OpenAI Transform: Force generating message_stop from flush');
                 const messageStop: ClaudeStreamMessageStop = {

@@ -15,31 +15,31 @@ export function validateOpenAIToolCalls(messages: OpenAIMessage[]): {
   const errors: string[] = [];
   const toolCallIds = new Set<string>();
   const toolResultIds = new Set<string>();
-  
+
   messages.forEach((msg, index) => {
     // Collect tool_calls from assistant messages
     if (msg.role === 'assistant' && msg.tool_calls) {
-      msg.tool_calls.forEach(tc => {
+      msg.tool_calls.forEach((tc) => {
         toolCallIds.add(tc.id);
       });
     }
-    
+
     // Collect tool results
     if (msg.role === 'tool' && msg.tool_call_id) {
       toolResultIds.add(msg.tool_call_id);
     }
   });
-  
+
   // Find orphaned tool_calls
   for (const id of toolCallIds) {
     if (!toolResultIds.has(id)) {
       errors.push(`Tool call "${id}" has no corresponding tool result message`);
     }
   }
-  
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
@@ -53,10 +53,10 @@ export function validateClaudeToolCalls(messages: ClaudeMessage[]): {
   const errors: string[] = [];
   const toolUseIds = new Map<string, number>();
   const toolResultIds = new Map<string, number>();
-  
+
   messages.forEach((msg, index) => {
     if (Array.isArray(msg.content)) {
-      msg.content.forEach(content => {
+      msg.content.forEach((content) => {
         if (content.type === 'tool_use') {
           toolUseIds.set(content.id, index);
         } else if (content.type === 'tool_result') {
@@ -65,7 +65,7 @@ export function validateClaudeToolCalls(messages: ClaudeMessage[]): {
       });
     }
   });
-  
+
   // Find orphaned tool_uses
   for (const [id, msgIndex] of toolUseIds) {
     if (!toolResultIds.has(id)) {
@@ -73,14 +73,16 @@ export function validateClaudeToolCalls(messages: ClaudeMessage[]): {
     } else {
       const resultIndex = toolResultIds.get(id)!;
       if (resultIndex <= msgIndex) {
-        errors.push(`Tool use "${id}" at message[${msgIndex}] has tool_result at message[${resultIndex}] (should come after)`);
+        errors.push(
+          `Tool use "${id}" at message[${msgIndex}] has tool_result at message[${resultIndex}] (should come after)`
+        );
       }
     }
   }
-  
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
@@ -93,15 +95,15 @@ export function fixOrphanedToolCalls(messages: OpenAIMessage[]): OpenAIMessage[]
   if (validation.valid) {
     return messages;
   }
-  
+
   const fixed = [...messages];
   const toolCallsWithoutResults = new Set<string>();
   const toolResultIds = new Set<string>();
-  
+
   // First pass: identify what's missing
-  messages.forEach(msg => {
+  messages.forEach((msg) => {
     if (msg.role === 'assistant' && msg.tool_calls) {
-      msg.tool_calls.forEach(tc => {
+      msg.tool_calls.forEach((tc) => {
         toolCallsWithoutResults.add(tc.id);
       });
     }
@@ -110,28 +112,28 @@ export function fixOrphanedToolCalls(messages: OpenAIMessage[]): OpenAIMessage[]
       toolCallsWithoutResults.delete(msg.tool_call_id);
     }
   });
-  
+
   // Second pass: insert missing tool results
   for (let i = fixed.length - 1; i >= 0; i--) {
     const msg = fixed[i];
     if (msg.role === 'assistant' && msg.tool_calls) {
       const missingResults = msg.tool_calls
-        .filter(tc => toolCallsWithoutResults.has(tc.id))
-        .map(tc => ({
+        .filter((tc) => toolCallsWithoutResults.has(tc.id))
+        .map((tc) => ({
           role: 'tool' as const,
           tool_call_id: tc.id,
-          content: JSON.stringify({ 
+          content: JSON.stringify({
             error: 'No tool result provided',
-            note: 'This is a placeholder generated to prevent API errors'
-          })
+            note: 'This is a placeholder generated to prevent API errors',
+          }),
         }));
-      
+
       if (missingResults.length > 0) {
         // Insert the missing results after this assistant message
         fixed.splice(i + 1, 0, ...missingResults);
       }
     }
   }
-  
+
   return fixed;
 }

@@ -67,7 +67,7 @@ export default {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
         url: url.pathname,
-        method: request.method
+        method: request.method,
       });
       return new Response(JSON.stringify({ error: 'Internal Server Error' }), {
         status: 500,
@@ -174,17 +174,24 @@ async function handleOpenAIToClaude(
         requestSummary: {
           method: request.method,
           url: request.url,
-          headers: Object.fromEntries(request.headers.entries())
-        }
+          headers: Object.fromEntries(request.headers.entries()),
+        },
       });
       throw new Error('Invalid JSON request body');
     }
     const isStream = openAIRequest.stream === true;
-    console.log('Request parsed:', { isStream, model: openAIRequest.model, messageCount: openAIRequest.messages?.length });
+    console.log('Request parsed:', {
+      isStream,
+      model: openAIRequest.model,
+      messageCount: openAIRequest.messages?.length,
+    });
 
     // Convert OpenAI request to Claude format
     const claudeRequest = formatRequestClaude(openAIRequest);
-    console.log('Claude request formatted:', { stream: claudeRequest.stream, model: claudeRequest.model });
+    console.log('Claude request formatted:', {
+      stream: claudeRequest.stream,
+      model: claudeRequest.model,
+    });
 
     // Prepare headers for Claude API
     const headers = new Headers();
@@ -210,7 +217,10 @@ async function handleOpenAIToClaude(
     });
 
     console.log('Claude API response status:', claudeResponse.status, claudeResponse.statusText);
-    console.log('Claude API response headers:', Object.fromEntries(claudeResponse.headers.entries()));
+    console.log(
+      'Claude API response headers:',
+      Object.fromEntries(claudeResponse.headers.entries())
+    );
 
     // Check if response is an error
     if (!claudeResponse.ok) {
@@ -226,8 +236,8 @@ async function handleOpenAIToClaude(
           responseSummary: {
             status: claudeResponse.status,
             statusText: claudeResponse.statusText,
-            headers: Object.fromEntries(claudeResponse.headers.entries())
-          }
+            headers: Object.fromEntries(claudeResponse.headers.entries()),
+          },
         });
         errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
       }
@@ -245,7 +255,9 @@ async function handleOpenAIToClaude(
     if (isStream && claudeResponse.body) {
       console.log('=== Starting Claude to OpenAI Stream Conversion ===');
       // Transform Claude SSE to OpenAI format
-      const transformedStream = claudeResponse.body.pipeThrough(createClaudeToOpenAITransform());
+      const transformedStream = claudeResponse.body.pipeThrough(
+        createClaudeToOpenAITransform(openAIRequest.model)
+      );
 
       console.log('Stream transformation created, returning response');
       return new Response(transformedStream, {
@@ -269,8 +281,8 @@ async function handleOpenAIToClaude(
           responseSummary: {
             status: claudeResponse.status,
             statusText: claudeResponse.statusText,
-            headers: Object.fromEntries(claudeResponse.headers.entries())
-          }
+            headers: Object.fromEntries(claudeResponse.headers.entries()),
+          },
         });
         throw new Error('Failed to parse Claude API response');
       }
@@ -291,8 +303,8 @@ async function handleOpenAIToClaude(
       requestSummary: {
         method: request.method,
         url: request.url,
-        headers: Object.fromEntries(request.headers.entries())
-      }
+        headers: Object.fromEntries(request.headers.entries()),
+      },
     });
     return new Response(
       JSON.stringify({
@@ -332,8 +344,8 @@ async function handleClaudeToOpenAI(
         requestSummary: {
           method: request.method,
           url: request.url,
-          headers: Object.fromEntries(request.headers.entries())
-        }
+          headers: Object.fromEntries(request.headers.entries()),
+        },
       });
       throw new Error('Invalid JSON request body');
     }
@@ -420,8 +432,8 @@ async function handleClaudeToOpenAI(
           responseSummary: {
             status: openAIResponse.status,
             statusText: openAIResponse.statusText,
-            headers: Object.fromEntries(openAIResponse.headers.entries())
-          }
+            headers: Object.fromEntries(openAIResponse.headers.entries()),
+          },
         });
         errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
       }
@@ -439,7 +451,7 @@ async function handleClaudeToOpenAI(
       console.log('=== Starting OpenAI to Claude Stream Conversion ===');
       console.log('OpenAI response status:', openAIResponse.status);
       console.log('OpenAI response headers:', Object.fromEntries(openAIResponse.headers.entries()));
-      
+
       // For stream, ensure upstream is SSE
       if (!contentType.includes('text/event-stream')) {
         console.error('ERROR: Expected SSE but got:', contentType);
@@ -448,11 +460,13 @@ async function handleClaudeToOpenAI(
         return new Response(
           JSON.stringify({
             error: {
-              message: 'Expected text/event-stream for streaming response but received different content type',
+              message:
+                'Expected text/event-stream for streaming response but received different content type',
               type: 'invalid_content_type',
               upstream: { contentType, status: openAIResponse.status },
               textPreview: text.slice(0, 500),
-              suggestion: '确认已使用 stream:true 且上游返回了 SSE。若经反代，请配置不缓存且不改写 Content-Type。',
+              suggestion:
+                '确认已使用 stream:true 且上游返回了 SSE。若经反代，请配置不缓存且不改写 Content-Type。',
             },
           }),
           { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -482,7 +496,8 @@ async function handleClaudeToOpenAI(
         return new Response(
           JSON.stringify({
             error: {
-              message: "Expected application/json but received different content type from upstream",
+              message:
+                'Expected application/json but received different content type from upstream',
               type: 'invalid_content_type',
               upstream: { contentType, status: openAIResponse.status },
               textPreview: text.slice(0, 500),
@@ -503,8 +518,8 @@ async function handleClaudeToOpenAI(
           responseSummary: {
             status: openAIResponse.status,
             statusText: openAIResponse.statusText,
-            headers: Object.fromEntries(openAIResponse.headers.entries())
-          }
+            headers: Object.fromEntries(openAIResponse.headers.entries()),
+          },
         });
         throw new Error('Failed to parse OpenAI API response');
       }
@@ -525,8 +540,8 @@ async function handleClaudeToOpenAI(
       requestSummary: {
         method: request.method,
         url: request.url,
-        headers: Object.fromEntries(request.headers.entries())
-      }
+        headers: Object.fromEntries(request.headers.entries()),
+      },
     });
     return new Response(
       JSON.stringify({

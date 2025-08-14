@@ -449,11 +449,7 @@ describe('formatRequestOpenAI', () => {
     });
 
     it('should pass through Claude 2 and instant models without conversion', () => {
-      const models = [
-        'claude-2.1',
-        'claude-2.0',
-        'claude-instant-1.2',
-      ];
+      const models = ['claude-2.1', 'claude-2.0', 'claude-instant-1.2'];
 
       for (const model of models) {
         const claudeRequest: ClaudeRequest = {

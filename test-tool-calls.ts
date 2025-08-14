@@ -12,61 +12,61 @@ console.log('Testing Tool Calls Conversion...\n');
 
 // Test case 1: OpenAI format with tool_calls and tool results
 const openAIRequestWithTools: OpenAIRequest = {
-  model: "gpt-4",
+  model: 'gpt-4',
   messages: [
     {
-      role: "user",
-      content: "What's the weather in San Francisco?"
+      role: 'user',
+      content: "What's the weather in San Francisco?",
     },
     {
-      role: "assistant",
+      role: 'assistant',
       content: null,
       tool_calls: [
         {
-          id: "call_abc123",
-          type: "function",
+          id: 'call_abc123',
+          type: 'function',
           function: {
-            name: "get_weather",
-            arguments: JSON.stringify({ location: "San Francisco", unit: "celsius" })
-          }
-        }
-      ]
+            name: 'get_weather',
+            arguments: JSON.stringify({ location: 'San Francisco', unit: 'celsius' }),
+          },
+        },
+      ],
     },
     {
-      role: "tool",
-      tool_call_id: "call_abc123",
-      content: JSON.stringify({ temperature: 20, condition: "sunny" })
+      role: 'tool',
+      tool_call_id: 'call_abc123',
+      content: JSON.stringify({ temperature: 20, condition: 'sunny' }),
     },
     {
-      role: "assistant",
-      content: "The weather in San Francisco is currently 20°C and sunny."
-    }
+      role: 'assistant',
+      content: 'The weather in San Francisco is currently 20°C and sunny.',
+    },
   ],
   tools: [
     {
-      type: "function",
+      type: 'function',
       function: {
-        name: "get_weather",
-        description: "Get the current weather in a given location",
+        name: 'get_weather',
+        description: 'Get the current weather in a given location',
         parameters: {
-          type: "object",
+          type: 'object',
           properties: {
             location: {
-              type: "string",
-              description: "The city and state, e.g. San Francisco, CA"
+              type: 'string',
+              description: 'The city and state, e.g. San Francisco, CA',
             },
             unit: {
-              type: "string",
-              enum: ["celsius", "fahrenheit"]
-            }
+              type: 'string',
+              enum: ['celsius', 'fahrenheit'],
+            },
           },
-          required: ["location"]
-        }
-      }
-    }
+          required: ['location'],
+        },
+      },
+    },
   ],
   temperature: 0.7,
-  max_tokens: 150
+  max_tokens: 150,
 };
 
 console.log('Test 1: OpenAI with tool_calls → Claude');
@@ -77,12 +77,12 @@ try {
   const claudeRequest = formatRequestClaude(openAIRequestWithTools);
   console.log('\nConverted Claude Request:');
   console.log(JSON.stringify(claudeRequest, null, 2));
-  
+
   // Validate that tool_use and tool_result are properly paired
   let foundToolUse = false;
   let foundToolResult = false;
   let toolUseId = '';
-  
+
   for (const message of claudeRequest.messages) {
     if (Array.isArray(message.content)) {
       for (const content of message.content) {
@@ -103,7 +103,7 @@ try {
       }
     }
   }
-  
+
   if (foundToolUse && foundToolResult) {
     console.log('✅ Tool calls conversion successful - both tool_use and tool_result present\n');
   } else {
@@ -115,60 +115,60 @@ try {
 
 // Test case 2: Claude format with tool_use back to OpenAI
 const claudeRequestWithTools: ClaudeRequest = {
-  model: "claude-3-opus-20240229",
+  model: 'claude-3-opus-20240229',
   messages: [
     {
-      role: "user",
-      content: "What's the weather in New York?"
+      role: 'user',
+      content: "What's the weather in New York?",
     },
     {
-      role: "assistant",
+      role: 'assistant',
       content: [
         {
-          type: "tool_use",
-          id: "toolu_01A2B3C4",
-          name: "get_weather",
-          input: { location: "New York", unit: "fahrenheit" }
-        }
-      ]
+          type: 'tool_use',
+          id: 'toolu_01A2B3C4',
+          name: 'get_weather',
+          input: { location: 'New York', unit: 'fahrenheit' },
+        },
+      ],
     },
     {
-      role: "user",
+      role: 'user',
       content: [
         {
-          type: "tool_result",
-          tool_use_id: "toolu_01A2B3C4",
-          content: JSON.stringify({ temperature: 75, condition: "cloudy" })
-        }
-      ]
+          type: 'tool_result',
+          tool_use_id: 'toolu_01A2B3C4',
+          content: JSON.stringify({ temperature: 75, condition: 'cloudy' }),
+        },
+      ],
     },
     {
-      role: "assistant",
-      content: "The weather in New York is currently 75°F and cloudy."
-    }
+      role: 'assistant',
+      content: 'The weather in New York is currently 75°F and cloudy.',
+    },
   ],
   tools: [
     {
-      name: "get_weather",
-      description: "Get the current weather in a given location",
+      name: 'get_weather',
+      description: 'Get the current weather in a given location',
       input_schema: {
-        type: "object",
+        type: 'object',
         properties: {
           location: {
-            type: "string",
-            description: "The city and state"
+            type: 'string',
+            description: 'The city and state',
           },
           unit: {
-            type: "string",
-            enum: ["celsius", "fahrenheit"]
-          }
+            type: 'string',
+            enum: ['celsius', 'fahrenheit'],
+          },
         },
-        required: ["location"]
-      }
-    }
+        required: ['location'],
+      },
+    },
   ],
   max_tokens: 150,
-  temperature: 0.7
+  temperature: 0.7,
 };
 
 console.log('Test 2: Claude with tool_use → OpenAI');
@@ -179,12 +179,12 @@ try {
   const openAIRequest = formatRequestOpenAI(claudeRequestWithTools);
   console.log('\nConverted OpenAI Request:');
   console.log(JSON.stringify(openAIRequest, null, 2));
-  
+
   // Validate that tool_calls and tool messages are properly converted
   let foundToolCall = false;
   let foundToolMessage = false;
   let toolCallId = '';
-  
+
   for (const message of openAIRequest.messages) {
     if (message.tool_calls && message.tool_calls.length > 0) {
       foundToolCall = true;
@@ -201,7 +201,7 @@ try {
       }
     }
   }
-  
+
   if (foundToolCall && foundToolMessage) {
     console.log('✅ Tool calls conversion successful - both tool_calls and tool message present\n');
   } else {
@@ -213,43 +213,43 @@ try {
 
 // Test case 3: Edge case - tool_use without corresponding tool_result
 const openAIRequestMissingResult: OpenAIRequest = {
-  model: "gpt-4",
+  model: 'gpt-4',
   messages: [
     {
-      role: "user",
-      content: "What's the weather?"
+      role: 'user',
+      content: "What's the weather?",
     },
     {
-      role: "assistant",
+      role: 'assistant',
       content: null,
       tool_calls: [
         {
-          id: "call_xyz789",
-          type: "function",
+          id: 'call_xyz789',
+          type: 'function',
           function: {
-            name: "get_weather",
-            arguments: JSON.stringify({ location: "London" })
-          }
-        }
-      ]
-    }
+            name: 'get_weather',
+            arguments: JSON.stringify({ location: 'London' }),
+          },
+        },
+      ],
+    },
     // Note: Missing tool result message here
   ],
   tools: [
     {
-      type: "function",
+      type: 'function',
       function: {
-        name: "get_weather",
-        description: "Get weather",
+        name: 'get_weather',
+        description: 'Get weather',
         parameters: {
-          type: "object",
+          type: 'object',
           properties: {
-            location: { type: "string" }
-          }
-        }
-      }
-    }
-  ]
+            location: { type: 'string' },
+          },
+        },
+      },
+    },
+  ],
 };
 
 console.log('Test 3: Edge case - tool_calls without tool result');

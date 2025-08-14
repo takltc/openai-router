@@ -5,7 +5,7 @@
  * @update 2025-08-12
  * @description Converts OpenAI API response format to Claude format, including stop_reason mapping,
  * usage conversion, and tool_use transformation
- * 
+ *
  * Model Mapping Strategy (v2.0.0+):
  * - Primary: Direct pass-through - model names are transmitted without conversion
  * - Fallback: When mapping is needed (e.g., legacy compatibility):
@@ -177,8 +177,8 @@ function convertToolCalls(toolCalls: OpenAIToolCall[]): ClaudeToolUseContent[] {
         toolCallSummary: {
           id: toolCall.id,
           name: toolCall.function.name,
-          argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
-        }
+          argumentsPreview: toolCall.function.arguments?.substring(0, 200) || '',
+        },
       });
       // Create with empty input if parsing fails
       claudeToolUses.push({
@@ -250,8 +250,8 @@ function convertMessageContent(
         stack: error instanceof Error ? error.stack : undefined,
         functionCallSummary: {
           name: functionCall.name,
-          argumentsPreview: functionCall.arguments?.substring(0, 200) || ''
-        }
+          argumentsPreview: functionCall.arguments?.substring(0, 200) || '',
+        },
       });
       claudeContent.push({
         type: 'tool_use',
@@ -275,13 +275,13 @@ function convertMessageContent(
 
 /**
  * Map OpenAI model to Claude model
- * 
+ *
  * Current implementation: Direct pass-through without any conversion.
  * Returns the input model name as-is to support flexible model routing.
- * 
+ *
  * Note: If model mapping is needed in the future, implement the mapping logic here.
  * For scenarios where no model name is provided, a default mapping could be used.
- * 
+ *
  * @param openAIModel - The OpenAI model name to map
  * @returns The model name unchanged (pass-through)
  */
@@ -523,7 +523,7 @@ export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeS
   const finishReason = chunk.choices[0]?.finish_reason;
   const hasUsage = !!chunk.usage;
   const isLastChunk = finishReason || hasUsage;
-  
+
   if (finishReason || isLastChunk) {
     // Close any open content blocks
     if (state.currentContent || state.currentToolCall) {
@@ -556,12 +556,12 @@ export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeS
       type: 'message_stop',
     };
     events.push(messageStop);
-    
+
     console.log('OpenAI to Claude: Message completion detected', {
       finishReason,
       hasUsage,
       stopReason,
-      isLastChunk
+      isLastChunk,
     });
   }
 
@@ -608,9 +608,9 @@ export function parseAndConvertOpenAIStreamChunk(
         state: {
           messageId: state.messageId,
           model: state.model,
-          hasStarted: state.hasStarted
-        }
-      }
+          hasStarted: state.hasStarted,
+        },
+      },
     });
     return { events: null, updatedState: state };
   }

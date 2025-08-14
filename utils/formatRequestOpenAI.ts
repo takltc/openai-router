@@ -5,7 +5,7 @@
  * @update 2025-08-12
  * @description Converts Claude API request format to OpenAI format, including message mapping,
  * system prompts, tools conversion, and parameter mapping
- * 
+ *
  * Model Mapping Strategy (v2.0.0+):
  * - Primary: Direct pass-through - model names are transmitted without conversion
  * - Fallback: When mapping is needed (e.g., legacy compatibility):
@@ -156,10 +156,8 @@ function convertMessage(
   // First, check if this message contains ONLY tool_result items
   // In Claude format, tool results are in user messages, but in OpenAI they should be tool messages
   if (Array.isArray(message.content)) {
-    const hasOnlyToolResults = message.content.every(
-      item => item.type === 'tool_result'
-    );
-    
+    const hasOnlyToolResults = message.content.every((item) => item.type === 'tool_result');
+
     if (hasOnlyToolResults && message.content.length > 0) {
       // Convert directly to tool messages without creating a user message
       const toolMessages: OpenAIMessage[] = [];
@@ -214,7 +212,7 @@ function convertMessage(
   // Handle mixed content with tool results (rare case)
   const toolMessages: OpenAIMessage[] = [];
   let hasNonToolResultContent = false;
-  
+
   if (Array.isArray(message.content)) {
     for (const item of message.content) {
       if (item.type === 'tool_result') {
@@ -244,7 +242,9 @@ function convertMessage(
 /**
  * Extract system prompt from Claude system field
  */
-function extractSystemPrompt(system?: string | ClaudeSystemMessage[] | ClaudeSystemMessage | null): string | null {
+function extractSystemPrompt(
+  system?: string | ClaudeSystemMessage[] | ClaudeSystemMessage | null
+): string | null {
   if (!system) {
     return null;
   }
@@ -316,13 +316,13 @@ function convertToolChoice(claudeToolChoice?: {
 
 /**
  * Map Claude model to OpenAI model
- * 
+ *
  * Current implementation: Direct pass-through without any conversion.
  * Returns the input model name as-is to support flexible model routing.
- * 
+ *
  * Note: If model mapping is needed in the future, implement the mapping logic here.
  * For scenarios where no model name is provided, a default mapping could be used.
- * 
+ *
  * @param claudeModel - The Claude model name to map
  * @returns The model name unchanged (pass-through)
  */

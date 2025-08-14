@@ -51,7 +51,7 @@ describe('SSE utilities', () => {
     // 这个测试确保[DONE]消息不会产生JSON解析错误
     const sseString = 'data: [DONE]\n\n';
     const parsed = parseSSE(sseString);
-    
+
     expect(parsed).not.toBeNull();
     expect(parsed?.data).toBe('[DONE]');
     expect(isDoneMessage(parsed!)).toBe(true);
@@ -61,7 +61,7 @@ describe('SSE utilities', () => {
     // 测试缺少换行符的[DONE]消息
     const incompleteSSE = 'data: [DONE]';
     const parsed = parseIncompleteSSE(incompleteSSE);
-    
+
     expect(parsed).not.toBeNull();
     expect(parsed?.data).toBe('[DONE]');
     expect(isDoneMessage(parsed!)).toBe(true);
@@ -69,11 +69,11 @@ describe('SSE utilities', () => {
 
   it('should handle special SSE markers correctly', () => {
     const specialMarkers = ['[DONE]', 'ping', 'heartbeat'];
-    
+
     for (const marker of specialMarkers) {
       const sseString = `data: ${marker}\n\n`;
       const parsed = parseSSE(sseString);
-      
+
       expect(parsed).not.toBeNull();
       expect(parsed?.data).toBe(marker);
     }

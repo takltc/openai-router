@@ -5,7 +5,7 @@
  * @update 2025-08-12
  * @description Converts Claude API response format to OpenAI format, including finish_reason mapping,
  * usage conversion, and function_call/tool_calls transformation
- * 
+ *
  * Model Mapping Strategy (v2.0.0+):
  * - Primary: Direct pass-through - model names are transmitted without conversion
  * - Fallback: When mapping is needed (e.g., legacy compatibility):
@@ -156,13 +156,13 @@ function convertClaudeContentToMessage(
 
 /**
  * Map Claude model to OpenAI model
- * 
+ *
  * Current implementation: Direct pass-through without any conversion.
  * Returns the input model name as-is to support flexible model routing.
- * 
+ *
  * Note: If model mapping is needed in the future, implement the mapping logic here.
  * For scenarios where no model name is provided, a default mapping could be used.
- * 
+ *
  * @param claudeModel - The Claude model name to map
  * @returns The model name unchanged (pass-through)
  */
@@ -406,13 +406,16 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
       // Send finish reason (handle null stop_reason by checking for completion indicators)
       const hasToolUse = state.currentToolCall !== undefined;
       let finishReason = mapStopReasonToFinishReason(event.delta.stop_reason, hasToolUse);
-      
+
       // If stop_reason is null but we have usage data, assume end_turn
       if (!finishReason && event.usage) {
         finishReason = hasToolUse ? 'tool_calls' : 'stop';
-        console.log('Claude to OpenAI: Null stop_reason with usage data, defaulting to:', finishReason);
+        console.log(
+          'Claude to OpenAI: Null stop_reason with usage data, defaulting to:',
+          finishReason
+        );
       }
-      
+
       const chunk: OpenAIStreamChunk = {
         id: state.messageId,
         object: 'chat.completion.chunk',
@@ -505,9 +508,9 @@ export function parseAndConvertStreamChunk(
         dataPreview: sseData.substring(0, 200),
         state: {
           messageId: state.messageId,
-          model: state.model
-        }
-      }
+          model: state.model,
+        },
+      },
     });
     return { chunk: null, updatedState: state };
   }

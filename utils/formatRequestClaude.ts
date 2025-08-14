@@ -5,7 +5,7 @@
  * @update 2025-08-12
  * @description Converts OpenAI API request format to Claude format, including message mapping,
  * system prompts, function_call/tool_use conversion, and parameter mapping
- * 
+ *
  * Model Mapping Strategy (v2.0.0+):
  * - Primary: Direct pass-through - model names are transmitted without conversion
  * - Fallback: When mapping is needed (e.g., legacy compatibility):
@@ -154,8 +154,8 @@ function convertMessageContent(
             toolCallSummary: {
               id: toolCall.id,
               name: toolCall.function.name,
-              argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
-            }
+              argumentsPreview: toolCall.function.arguments?.substring(0, 200) || '',
+            },
           });
           toolInput = {};
         }
@@ -214,8 +214,8 @@ function convertMessageContent(
           toolCallSummary: {
             id: toolCall.id,
             name: toolCall.function.name,
-            argumentsPreview: toolCall.function.arguments?.substring(0, 200) || ''
-          }
+            argumentsPreview: toolCall.function.arguments?.substring(0, 200) || '',
+          },
         });
         toolInput = {};
       }
@@ -286,8 +286,8 @@ function convertMessage(message: OpenAIMessage): ClaudeMessage | null {
             stack: parseError instanceof Error ? parseError.stack : undefined,
             functionCallSummary: {
               name: message.function_call.name,
-              argumentsPreview: message.function_call.arguments?.substring(0, 200) || ''
-            }
+              argumentsPreview: message.function_call.arguments?.substring(0, 200) || '',
+            },
           });
           return {};
         }
@@ -415,13 +415,13 @@ function convertToolChoice(
 
 /**
  * Map OpenAI model to Claude model
- * 
+ *
  * Current implementation: Direct pass-through without any conversion.
  * Returns the input model name as-is to support flexible model routing.
- * 
+ *
  * Note: If model mapping is needed in the future, implement the mapping logic here.
  * For scenarios where no model name is provided, a default mapping could be used.
- * 
+ *
  * @param openAIModel - The OpenAI model name to map
  * @returns The model name unchanged (pass-through)
  */
@@ -433,10 +433,10 @@ function mapModel(openAIModel: string): string {
 
 /**
  * Calculate max_tokens if not specified
- * 
+ *
  * Current implementation: Returns a universal default value for all models.
  * This ensures compatibility with any model name without hardcoded checks.
- * 
+ *
  * @param model - The model name (unused in current implementation)
  * @returns Default max_tokens value of 4096
  */
@@ -445,7 +445,7 @@ function calculateMaxTokens(model: string): number {
   // Using a universal default value for all models to support flexibility
   // If model-specific limits are needed in the future, they can be configured
   // through external configuration rather than hardcoded checks
-  
+
   // Universal default for all models
   return 4096;
 }
@@ -592,71 +592,29 @@ function validateMessageAlternation(messages: ClaudeMessage[]): ClaudeMessage[] 
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    const nextMessage = messages[i + 1];
-    
-    // Check if current message has tool_use content
-    const hasToolUse = Array.isArray(message.content) && 
-      message.content.some(c => c.type === 'tool_use');
-    
-    // Check if next message has tool_result content
-    const nextHasToolResult = nextMessage && 
-      Array.isArray(nextMessage.content) && 
-      nextMessage.content.some(c => c.type === 'tool_result');
-    
-    // If assistant message has tool_use and next is user with tool_result,
-    // these should be kept together and not merged with other messages
-    if (hasToolUse && nextHasToolResult) {
-      // Add the assistant message with tool_use
-      validated.push(message);
-      lastRole = message.role;
-      continue;
-    }
-    
+
     // If same role appears consecutively, merge them
-    const hasToolResult = Array.isArray(message.content) && 
-      message.content.some(c => c.type === 'tool_result');
-      
     if (lastRole === message.role && validated.length > 0) {
       const lastMessage = validated[validated.length - 1];
-      
-      // Don't merge if last message has tool_use content
-      const lastHasToolUse = Array.isArray(lastMessage.content) && 
-        lastMessage.content.some(c => c.type === 'tool_use');
-      
-      // Special case: merge tool_result messages (consecutive user messages with tool_result)
-      const lastHasToolResult = Array.isArray(lastMessage.content) && 
-        lastMessage.content.some(c => c.type === 'tool_result');
-      
-      // If either current or last has tool_use content, do NOT merge
-      const currentHasToolUseOnly = hasToolUse && !hasToolResult;
-      if (currentHasToolUseOnly || lastHasToolUse) {
-        validated.push(message);
-        lastRole = message.role;
-      } else if (hasToolResult && lastHasToolResult) {
-        // Merge tool_result contents
-        const lastContent = Array.isArray(lastMessage.content) ? lastMessage.content : [];
-        const currentContent = Array.isArray(message.content) ? message.content : [];
-        lastMessage.content = [...lastContent, ...currentContent];
-      } else if (!lastHasToolUse && !hasToolResult) {
-        // Merge regular content (not tool-related)
-        if (typeof lastMessage.content === 'string' && typeof message.content === 'string') {
-          lastMessage.content = `${lastMessage.content}\n\n${message.content}`;
-        } else {
-          // Convert to array and merge
-          const lastContent =
-            typeof lastMessage.content === 'string'
-              ? [{ type: 'text' as const, text: lastMessage.content }]
-              : lastMessage.content;
-          const currentContent =
-            typeof message.content === 'string'
-              ? [{ type: 'text' as const, text: message.content }]
-              : message.content;
 
-          lastMessage.content = [...lastContent, ...currentContent];
-        }
+      // Merge content for consecutive messages of the same role
+      if (typeof lastMessage.content === 'string' && typeof message.content === 'string') {
+        lastMessage.content = `${lastMessage.content}\n\n${message.content}`;
       } else {
-        validated.push(message);
-        lastRole = message.role;
+        // Convert to array and merge
+        const lastContent = Array.isArray(lastMessage.content)
+          ? lastMessage.content
+          : typeof lastMessage.content === 'string'
+            ? [{ type: 'text' as const, text: lastMessage.content }]
+            : [];
+
+        const currentContent = Array.isArray(message.content)
+          ? message.content
+          : typeof message.content === 'string'
+            ? [{ type: 'text' as const, text: message.content }]
+            : [];
+
+        lastMessage.content = [...lastContent, ...currentContent];
       }
     } else {
       validated.push(message);
@@ -672,9 +630,6 @@ function validateMessageAlternation(messages: ClaudeMessage[]): ClaudeMessage[] 
       content: 'Continue.',
     });
   }
-
-  // Ensure last message is from user if we need a response
-  // This is typically handled by the API itself, but we can add if needed
 
   return validated;
 }
