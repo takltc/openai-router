@@ -12,7 +12,7 @@ import { formatResponseClaude } from './utils/formatResponseClaude';
 import { createOpenAIToClaudeTransform } from './utils/streamResponseOpenAI';
 import { createClaudeToOpenAITransform } from './utils/streamResponseClaude';
 import { validateOpenAIToolCalls, fixOrphanedToolCalls } from './utils/validateToolCalls';
-import type { OpenAIRequest } from './utils/types';
+import type { OpenAIRequest, ClaudeRequest, ClaudeMessage } from './utils/types';
 
 export interface Env {
   OPENAI_BASE_URL: string;
@@ -101,6 +101,9 @@ export default {
       if (url.pathname === '/v1/chat/completions') {
         // OpenAI format -> Claude API
         return await handleOpenAIToClaude(request, env, corsHeaders);
+      } else if (url.pathname === '/v1/messages/count_tokens' && request.method === 'POST') {
+        // Claude format count_tokens -> OpenAI usage bridge
+        return await handleClaudeCountTokensViaOpenAI(request, env, corsHeaders);
       } else if (url.pathname === '/v1/messages') {
         // Claude format -> OpenAI API
         return await handleClaudeToOpenAI(request, env, corsHeaders);
@@ -135,6 +138,146 @@ export default {
     }
   },
 };
+
+async function handleClaudeCountTokensViaOpenAI(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    // Parse Claude count_tokens request body
+    let claudeBody: unknown;
+    try {
+      claudeBody = await request.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: { message: 'Invalid JSON', type: 'invalid_request_error' } }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Expect at least model and messages
+    const cb = claudeBody as Pick<ClaudeRequest, 'model' | 'messages'> | null;
+    if (!cb || !cb.model || !cb.messages) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'Missing required fields: model, messages',
+            type: 'invalid_request_error',
+          },
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Reuse converter to build OpenAI chat request from Claude format
+    // For count_tokens, Claude body may not include max_tokens; construct a minimal valid ClaudeRequest
+    const cbFull: ClaudeRequest = {
+      model: cb.model,
+      messages: cb.messages as ClaudeMessage[],
+      max_tokens: 1,
+    };
+    const converted = convertClaudeToOpenAI(cbFull);
+    if (!converted) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'Invalid Claude request: conversion failed',
+            type: 'invalid_request_error',
+          },
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Ensure non-stream and minimal generation; we only need token usage
+    converted.stream = false;
+    if (converted.max_tokens == null) {
+      converted.max_tokens = 262000;
+    }
+
+    // Prepare headers for OpenAI
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    const apiKey = request.headers.get('X-API-Key') || request.headers.get('Authorization');
+    if (apiKey) {
+      headers.set('Authorization', apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`);
+    } else if (env.OPENAI_API_KEY) {
+      headers.set('Authorization', `Bearer ${env.OPENAI_API_KEY}`);
+    }
+
+    // Call OpenAI chat completions to obtain usage
+    const upstream = await fetch(`${env.OPENAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(converted),
+    });
+
+    const contentType = upstream.headers.get('content-type') || '';
+    if (!upstream.ok) {
+      let errorData: unknown = null;
+      if (contentType.includes('application/json')) {
+        try {
+          errorData = await upstream.json();
+        } catch {}
+      }
+      return new Response(
+        JSON.stringify(
+          errorData || { error: { message: 'Upstream error', status: upstream.status } }
+        ),
+        { status: upstream.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!contentType.includes('application/json')) {
+      const text = await upstream.text();
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'Expected JSON from OpenAI usage call',
+            type: 'invalid_content_type',
+            textPreview: text.slice(0, 500),
+          },
+        }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const data = await upstream.json();
+    const promptTokens = data?.usage?.prompt_tokens;
+    if (typeof promptTokens !== 'number') {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'OpenAI response missing usage.prompt_tokens',
+            type: 'upstream_usage_missing',
+          },
+        }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Claude count_tokens minimal-compatible response
+    const claudeCountResponse = {
+      input_tokens: promptTokens,
+    };
+
+    return new Response(JSON.stringify(claudeCountResponse), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: error instanceof Error ? error.message : 'Internal server error',
+          type: 'internal_error',
+        },
+      }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+}
 
 async function handleOpenAIRequest(
   request: Request,
