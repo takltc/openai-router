@@ -36,7 +36,7 @@ export ANTHROPIC_SMALL_FAST_MODEL="gpt-3.5-turbo"
 
 1. **克隆并部署:**
    ```bash
-   git clone https://github.com/jizhejiang/openai-router
+   git clone https://github.com/takltc/openai-router
    cd openai-router
    npm install -g wrangler
    wrangler deploy
