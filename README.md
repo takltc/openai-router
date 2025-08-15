@@ -36,7 +36,7 @@ For better reliability and control, you can deploy your own instance of openai-r
 
 1. **Clone and deploy:**
    ```bash
-   git clone https://github.com/jizhejiang/openai-router
+   git clone https://github.com/takltc/openai-router
    cd openai-router
    npm install -g wrangler
    wrangler deploy
