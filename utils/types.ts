@@ -483,6 +483,9 @@ export interface StreamConversionState {
   messageId: string;
   created: number;
   model: string;
+  /**
+   * For legacy single-tool flow; prefer toolCallsState when handling multiple indexes concurrently
+   */
   currentToolCall?: {
     id: string;
     name: string;
@@ -493,6 +496,7 @@ export interface StreamConversionState {
     output_tokens: number;
   };
   contentBlockStarted?: boolean;
+  // legacy: moved to extended section below
   /**
    * Mapping of tool_use id → OpenAI tool_calls index during streaming conversion
    */
@@ -501,6 +505,21 @@ export interface StreamConversionState {
    * Next available OpenAI tool_calls index when a new tool_use appears
    */
   nextToolCallIndex?: number;
+
+  /**
+   * Extended state for OpenAI→Claude stable content_block indexing
+   */
+  contentIndex?: number;
+  /** Mapping of OpenAI tool_call.index -> Claude content_block index */
+  toolCallIndexToContentBlockIndex?: Map<number, number>;
+  /** Started tool block indices to avoid duplicate content_block_start */
+  toolBlockStartedIndices?: Set<number>;
+  /** Open tool block indices to close on finish */
+  openToolBlockIndices?: Set<number>;
+  /** Per-index tool call state (id/name/arguments accumulation) */
+  toolCallsState?: Map<number, { id?: string; name?: string; arguments: string }>;
+  /** The currently active tool block index, if single active */
+  currentToolCallIndex?: number;
 }
 
 /**

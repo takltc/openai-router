@@ -4,13 +4,7 @@
  * @date 2025-08-11
  */
 
-import type {
-  ClaudeStreamEvent,
-  OpenAIStreamChunk,
-  OpenAIStreamChoice,
-  OpenAIStreamDelta,
-  StreamConversionState,
-} from './types';
+import type { ClaudeStreamEvent, OpenAIStreamChunk, StreamConversionState } from './types';
 import {
   enqueueSSE,
   parseSSE,
@@ -18,6 +12,9 @@ import {
   parseIncompleteSSE,
   enqueueErrorAndDone,
 } from './sse';
+
+// Support both LF and CRLF separators when splitting SSE frames
+const SSE_MESSAGE_SPLIT_REGEX = /\r?\n\r?\n/;
 
 /**
  * Convert Claude stream event to OpenAI stream chunk
@@ -148,8 +145,7 @@ export function convertClaudeEventToOpenAI(
                 delta: {
                   tool_calls: [
                     {
-                      index:
-                        (state.currentToolCall?.id && state.toolCallIdToIndex?.get(state.currentToolCall.id)) ?? 0,
+                      index: state.toolCallIdToIndex?.get(state.currentToolCall?.id ?? '') ?? 0,
                       function: {
                         arguments: delta.partial_json,
                       },
@@ -247,6 +243,7 @@ export function transformClaudeStreamToOpenAI(
       const decoder = new TextDecoder();
       let buffer = '';
       let messageComplete = false;
+      let lastPayload = '';
 
       try {
         while (true) {
@@ -260,7 +257,7 @@ export function transformClaudeStreamToOpenAI(
 
           buffer += newData;
 
-          const messages = buffer.split('\n\n');
+          const messages = buffer.split(SSE_MESSAGE_SPLIT_REGEX);
           buffer = messages.pop() || '';
 
           for (let i = 0; i < messages.length; i++) {
@@ -296,9 +293,11 @@ export function transformClaudeStreamToOpenAI(
             // Convert to OpenAI chunk
             const chunk = convertClaudeEventToOpenAI(event, state);
             if (chunk) {
-              enqueueSSE(controller, {
-                data: JSON.stringify(chunk),
-              });
+              const payload = JSON.stringify(chunk);
+              if (payload !== lastPayload) {
+                enqueueSSE(controller, { data: payload });
+                lastPayload = payload;
+              }
             }
 
             // Check if message is complete
@@ -322,9 +321,11 @@ export function transformClaudeStreamToOpenAI(
             if (event && typeof event === 'object') {
               const chunk = convertClaudeEventToOpenAI(event, state);
               if (chunk) {
-                enqueueSSE(controller, {
-                  data: JSON.stringify(chunk),
-                });
+                const payload = JSON.stringify(chunk);
+                if (payload !== lastPayload) {
+                  enqueueSSE(controller, { data: payload });
+                  lastPayload = payload;
+                }
               }
 
               if (event.type === 'message_stop') {
@@ -368,18 +369,7 @@ export function transformClaudeStreamToOpenAI(
  * @param claudeModel - Claude model name
  * @returns OpenAI model name
  */
-function mapClaudeModelToOpenAI(claudeModel: string): string {
-  const modelMap: Record<string, string> = {
-    'claude-3-opus-20240229': 'gpt-4',
-    'claude-3-sonnet-20240229': 'gpt-3.5-turbo',
-    'claude-3-haiku-20240307': 'gpt-3.5-turbo',
-    'claude-2.1': 'gpt-3.5-turbo',
-    'claude-2.0': 'gpt-3.5-turbo',
-    'claude-instant-1.2': 'gpt-3.5-turbo',
-  };
-
-  return modelMap[claudeModel] || 'gpt-3.5-turbo';
-}
+// mapClaudeModelToOpenAI is currently unused; remove to satisfy lint
 
 /**
  * Map Claude stop reason to OpenAI finish reason
@@ -429,87 +419,89 @@ export function createClaudeToOpenAITransform(
   const encoder = new TextEncoder();
   let buffer = '';
   let messageComplete = false;
+  let lastSentData = '';
 
   return new TransformStream({
     transform(chunk: Uint8Array, controller) {
       const chunkText = decoder.decode(chunk, { stream: true });
 
       buffer += chunkText;
-      const messages = buffer.split('\n\n');
-      buffer = messages.pop() || '';
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-      for (const message of messages) {
-        if (!message.trim()) continue;
-
-        const parsed = parseSSE(message);
-        if (!parsed) {
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) {
           continue;
         }
+        const data = trimmed.slice(5).trim();
 
-        const event = parsed.data as ClaudeStreamEvent;
-
-        // Handle events without data (like ping)
-        if (!event) {
-          if (parsed.event === 'ping') {
-            continue;
-          } else if (parsed.event === 'message_stop') {
-            // Create a synthetic message_stop event
-            const syntheticEvent = { type: 'message_stop' } as ClaudeStreamEvent;
-            const openAIChunk = convertClaudeEventToOpenAI(syntheticEvent, state);
-            if (openAIChunk) {
-              const sseMessage = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-              controller.enqueue(encoder.encode(sseMessage));
-            }
-            // Mark message as complete
-            messageComplete = true;
+        if (data === '[DONE]') {
+          if (!messageComplete) {
             const doneMessage = 'data: [DONE]\n\n';
             controller.enqueue(encoder.encode(doneMessage));
-            continue;
+            messageComplete = true;
           }
           continue;
         }
 
-        if (typeof event !== 'object') {
-          continue;
-        }
+        try {
+          const event = JSON.parse(data) as ClaudeStreamEvent;
+          if (event && typeof event === 'object') {
+            const openAIChunk = convertClaudeEventToOpenAI(event, state);
+            if (openAIChunk) {
+              const payload = JSON.stringify(openAIChunk);
+              if (payload !== lastSentData) {
+                const sseMessage = `data: ${payload}\n\n`;
+                controller.enqueue(encoder.encode(sseMessage));
+                lastSentData = payload;
+              }
+            }
 
-        const openAIChunk = convertClaudeEventToOpenAI(event, state);
-        if (openAIChunk) {
-          const sseMessage = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-          controller.enqueue(encoder.encode(sseMessage));
-        }
-
-        if (event.type === 'message_stop') {
-          messageComplete = true;
-          // Send [DONE] message
-          const doneMessage = 'data: [DONE]\n\n';
-          controller.enqueue(encoder.encode(doneMessage));
+            if (event.type === 'message_stop') {
+              messageComplete = true;
+            } else if ((event as ClaudeStreamEvent).type === 'message_delta') {
+              const messageDelta = event as ClaudeStreamEvent & {
+                delta?: { stop_reason?: unknown };
+              };
+              if (messageDelta.delta?.stop_reason) {
+                messageComplete = true;
+              }
+            }
+          }
+        } catch {
+          // ignore malformed json/data line
         }
       }
     },
 
     flush(controller) {
-      if (buffer.trim()) {
-        const parsed = parseSSE(buffer);
-        if (parsed) {
-          const event = parsed.data as ClaudeStreamEvent;
-          if (event && typeof event === 'object') {
-            const openAIChunk = convertClaudeEventToOpenAI(event, state);
-            if (openAIChunk) {
-              const sseMessage = `data: ${JSON.stringify(openAIChunk)}\n\n`;
-              controller.enqueue(encoder.encode(sseMessage));
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data:')) {
+        const data = trimmed.slice(5).trim();
+        if (data && data !== '[DONE]') {
+          try {
+            const event = JSON.parse(data) as ClaudeStreamEvent;
+            if (event && typeof event === 'object') {
+              const openAIChunk = convertClaudeEventToOpenAI(event, state);
+              if (openAIChunk) {
+                const payload = JSON.stringify(openAIChunk);
+                if (payload !== lastSentData) {
+                  const sseMessage = `data: ${payload}\n\n`;
+                  controller.enqueue(encoder.encode(sseMessage));
+                  lastSentData = payload;
+                }
+              }
+              if (event.type === 'message_stop') {
+                messageComplete = true;
+              }
             }
-
-            if (event.type === 'message_stop') {
-              const doneMessage = 'data: [DONE]\n\n';
-              controller.enqueue(encoder.encode(doneMessage));
-              messageComplete = true;
-            }
+          } catch {
+            // ignore
           }
         }
       }
 
-      // Ensure [DONE] is sent if not already sent
       if (!messageComplete) {
         const doneMessage = 'data: [DONE]\n\n';
         controller.enqueue(encoder.encode(doneMessage));
@@ -524,10 +516,7 @@ export function createClaudeToOpenAITransform(
  * @param targetFormat - Target format (should be 'openai')
  * @returns Converted response with OpenAI-formatted stream
  */
-export async function convertClaudeStreamResponse(
-  response: Response,
-  targetFormat: 'openai' = 'openai'
-): Promise<Response> {
+export async function convertClaudeStreamResponse(response: Response): Promise<Response> {
   if (!response.body) {
     throw new Error('Response body is empty');
   }

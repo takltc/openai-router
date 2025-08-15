@@ -23,6 +23,9 @@ import {
   enqueueErrorAndDone,
 } from './sse';
 
+// Support both LF and CRLF separators when splitting SSE frames
+const SSE_MESSAGE_SPLIT_REGEX = /\r?\n\r?\n/;
+
 /**
  * Convert OpenAI stream chunk to Claude stream events
  * @param chunk - OpenAI stream chunk
@@ -34,6 +37,12 @@ export function convertOpenAIChunkToClaude(
   state: StreamConversionState
 ): ClaudeStreamEvent[] {
   const events: ClaudeStreamEvent[] = [];
+  // Initialize extended indexing state if absent
+  if (typeof state.contentIndex !== 'number') state.contentIndex = 0;
+  if (!state.toolCallIndexToContentBlockIndex) state.toolCallIndexToContentBlockIndex = new Map<number, number>();
+  if (!state.toolBlockStartedIndices) state.toolBlockStartedIndices = new Set<number>();
+  if (!state.openToolBlockIndices) state.openToolBlockIndices = new Set<number>();
+  if (!state.toolCallsState) state.toolCallsState = new Map<number, { id?: string; name?: string; arguments: string }>();
 
   // Handle first chunk - send message_start
   if (!state.messageId && chunk.id) {
@@ -66,15 +75,12 @@ export function convertOpenAIChunkToClaude(
 
     // Handle content
     if (delta.content !== undefined) {
-      // If this is the first content block, send content_block_start
-      if (!state.contentBlockStarted) {
+      // Open a text content block if not started
+      if (!state.contentBlockStarted && !state.currentToolCall) {
         const blockStart: ClaudeStreamContentBlockStart = {
           type: 'content_block_start',
-          index: 0,
-          content_block: {
-            type: 'text',
-            text: '',
-          },
+          index: state.contentIndex || 0,
+          content_block: { type: 'text', text: '' },
         };
         events.push(blockStart);
         state.contentBlockStarted = true;
@@ -83,7 +89,7 @@ export function convertOpenAIChunkToClaude(
       // Send content delta
       const contentDelta: ClaudeStreamContentBlockDelta = {
         type: 'content_block_delta',
-        index: 0,
+        index: state.contentIndex || 0,
         delta: {
           type: 'text_delta',
           text: delta.content,
@@ -94,86 +100,99 @@ export function convertOpenAIChunkToClaude(
 
     // Handle tool calls
     if (delta.tool_calls) {
+      const processedThisChoice = new Set<number>();
       for (const toolCall of delta.tool_calls) {
-        const index = toolCall.index || 0;
+        const openAIToolIdx = toolCall.index ?? 0;
+        if (processedThisChoice.has(openAIToolIdx)) continue;
+        processedThisChoice.add(openAIToolIdx);
 
-        // Start a new tool call
-        if (toolCall.id) {
-          // Close previous content block if exists
-          if (state.contentBlockStarted) {
-            const blockStop: ClaudeStreamContentBlockStop = {
-              type: 'content_block_stop',
-              index: 0,
-            };
-            events.push(blockStop);
-            state.contentBlockStarted = false;
-          }
-          // Close previous tool call if exists
-          if (state.currentToolCall) {
-            const blockStop: ClaudeStreamContentBlockStop = {
-              type: 'content_block_stop',
-              index: index - 1,
-            };
-            events.push(blockStop);
-          }
+        // Prepare per-index state
+        if (!state.toolCallsState.has(openAIToolIdx)) {
+          state.toolCallsState.set(openAIToolIdx, { arguments: '' });
+        }
+        const callState = state.toolCallsState.get(openAIToolIdx)!;
 
-          state.currentToolCall = {
-            id: toolCall.id,
-            name: toolCall.function?.name || '',
-            arguments: '',
+        // Close text block once when entering tools
+        if (state.contentBlockStarted && !state.openToolBlockIndices.size) {
+          const blockStop: ClaudeStreamContentBlockStop = {
+            type: 'content_block_stop',
+            index: state.contentIndex || 0,
           };
+          events.push(blockStop);
+          state.contentBlockStarted = false;
+          state.contentIndex = (state.contentIndex || 0) + 1;
+        }
 
+        // Stable mapping from tool idx to content_block idx
+        if (!state.toolCallIndexToContentBlockIndex.has(openAIToolIdx)) {
+          const assignIndex: number = state.contentIndex || 0;
+          state.toolCallIndexToContentBlockIndex.set(openAIToolIdx, assignIndex);
+          state.contentIndex = assignIndex + 1;
+        }
+        const contentBlockIndex = state.toolCallIndexToContentBlockIndex.get(openAIToolIdx) || 0;
+
+        // If tool id/name arrive (possibly later), update state and emit start once
+        if (toolCall.id) callState.id = toolCall.id;
+        if (toolCall.function?.name) callState.name = toolCall.function.name;
+
+        if (!state.toolBlockStartedIndices.has(contentBlockIndex)) {
           const toolStart: ClaudeStreamContentBlockStart = {
             type: 'content_block_start',
-            index,
+            index: contentBlockIndex,
             content_block: {
               type: 'tool_use',
-              id: toolCall.id,
-              name: toolCall.function?.name || '',
+              id: callState.id || `call_${openAIToolIdx}`,
+              name: callState.name || `tool_${openAIToolIdx}`,
               input: {},
             },
           };
           events.push(toolStart);
+          state.toolBlockStartedIndices.add(contentBlockIndex);
+          state.openToolBlockIndices.add(contentBlockIndex);
         }
 
-        // Append tool call arguments
-        if (toolCall.function?.arguments) {
-          if (state.currentToolCall) {
-            state.currentToolCall.arguments += toolCall.function.arguments;
+        // If later we receive definitive id/name, only update internal state; do not re-emit start
+        if (toolCall.id && !callState.id) callState.id = toolCall.id;
+        if (toolCall.function?.name && !callState.name) callState.name = toolCall.function.name;
 
-            const toolDelta: ClaudeStreamContentBlockDelta = {
-              type: 'content_block_delta',
-              index,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: toolCall.function.arguments,
-              },
-            };
-            events.push(toolDelta);
-          }
+        // Accumulate arguments and emit delta
+        if (toolCall.function?.arguments) {
+          callState.arguments += toolCall.function.arguments;
+          const toolDelta: ClaudeStreamContentBlockDelta = {
+            type: 'content_block_delta',
+            index: contentBlockIndex,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: toolCall.function.arguments,
+            },
+          };
+          events.push(toolDelta);
         }
       }
     }
 
     // Handle finish reason
     if (choice.finish_reason) {
-      // Close any open content blocks
-      if (state.contentBlockStarted) {
+      // Close any open tool blocks (all indices)
+      if (state.openToolBlockIndices.size) {
+        for (const idx of Array.from(state.openToolBlockIndices.values()).sort((a, b) => a - b)) {
+          const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: idx };
+          events.push(blockStop);
+        }
+        state.openToolBlockIndices.clear();
+        state.toolBlockStartedIndices.clear();
+        state.toolCallsState.clear();
+        state.currentToolCall = undefined;
+        state.currentToolCallIndex = undefined;
+        state.contentIndex = (state.contentIndex || 0) + 1;
+      } else if (state.contentBlockStarted) {
         const blockStop: ClaudeStreamContentBlockStop = {
           type: 'content_block_stop',
-          index: 0,
+          index: state.contentIndex || 0,
         };
         events.push(blockStop);
         state.contentBlockStarted = false;
-      }
-      // Close any open tool calls
-      if (state.currentToolCall) {
-        const blockStop: ClaudeStreamContentBlockStop = {
-          type: 'content_block_stop',
-          index: 0,
-        };
-        events.push(blockStop);
-        state.currentToolCall = undefined;
+        state.contentIndex = (state.contentIndex || 0) + 1;
       }
 
       // Send message delta with stop reason
@@ -194,6 +213,14 @@ export function convertOpenAIChunkToClaude(
         type: 'message_stop',
       };
       events.push(messageStop);
+
+      // Reset per-stream transient states to avoid leaking into next message
+      state.toolBlockStartedIndices?.clear();
+      state.openToolBlockIndices?.clear();
+      state.toolCallsState?.clear();
+      state.toolCallIndexToContentBlockIndex?.clear();
+      state.currentToolCall = undefined;
+      state.currentToolCallIndex = undefined;
     }
   }
 
@@ -238,7 +265,7 @@ export function transformOpenAIStreamToClaude(
           }
 
           buffer += decoder.decode(value, { stream: true });
-          const messages = buffer.split('\n\n');
+          const messages = buffer.split(SSE_MESSAGE_SPLIT_REGEX);
           buffer = messages.pop() || '';
 
           for (const message of messages) {
@@ -260,12 +287,13 @@ export function transformOpenAIStreamToClaude(
             // Convert to Claude events
             const events = convertOpenAIChunkToClaude(chunk, state);
 
-            // Send each event as SSE
+            // Send each event as SSE with de-dup guard per event type
+            const lastEventByType: Record<string, string> = {};
             for (const event of events) {
-              enqueueSSE(controller, {
-                event: event.type,
-                data: JSON.stringify(event),
-              });
+              const payload = JSON.stringify(event);
+              if (lastEventByType[event.type] === payload) continue;
+              lastEventByType[event.type] = payload;
+              enqueueSSE(controller, { event: event.type, data: payload });
             }
           }
         }
@@ -284,11 +312,12 @@ export function transformOpenAIStreamToClaude(
             const chunk = parsed.data as OpenAIStreamChunk;
             if (chunk && typeof chunk === 'object') {
               const events = convertOpenAIChunkToClaude(chunk, state);
+              const lastEventByType: Record<string, string> = {};
               for (const event of events) {
-                enqueueSSE(controller, {
-                  event: event.type,
-                  data: JSON.stringify(event),
-                });
+                const payload = JSON.stringify(event);
+                if (lastEventByType[event.type] === payload) continue;
+                lastEventByType[event.type] = payload;
+                enqueueSSE(controller, { event: event.type, data: payload });
               }
 
               // Check if this is a completion event that needs to trigger a finish
@@ -377,186 +406,95 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
-  let chunkCount = 0;
-  let eventCount = 0;
   let messageStopSent = false;
-
-  console.log('=== OpenAI to Claude Transform Stream Created ===');
+  const lastEventByType: Record<string, string> = {};
 
   return new TransformStream({
     transform(chunk: Uint8Array, controller) {
-      chunkCount++;
       const chunkText = decoder.decode(chunk, { stream: true });
-      console.log(`OpenAI Transform: Chunk #${chunkCount} received, size: ${chunk.length} bytes`);
-      console.log(
-        `OpenAI Transform: Chunk preview: ${chunkText.substring(0, 200)}${chunkText.length > 200 ? '...' : ''}`
-      );
-
       buffer += chunkText;
-      console.log(`OpenAI Transform: Buffer size after append: ${buffer.length}`);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-      const messages = buffer.split('\n\n');
-      buffer = messages.pop() || '';
-      console.log(
-        `OpenAI Transform: Split into ${messages.length} messages, remaining buffer: ${buffer.length} chars`
-      );
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
 
-      for (const message of messages) {
-        if (!message.trim()) {
-          console.log('OpenAI Transform: Empty message, skipping');
-          continue;
-        }
-
-        console.log(`OpenAI Transform: Processing message: ${message.substring(0, 100)}`);
-        const parsed = parseSSE(message);
-        if (!parsed) {
-          console.log('OpenAI Transform: Failed to parse SSE message');
-          continue;
-        }
-
-        console.log('OpenAI Transform: Parsed SSE:', parsed);
-        if (isDoneMessage(parsed)) {
-          console.log('OpenAI Transform: [DONE] message received');
-          // If upstream did not include a final finish_reason chunk,
-          // synthesize a graceful termination for Claude clients.
+        if (data === '[DONE]') {
           if (!messageStopSent) {
-            // Close any open content block
             if (state.contentBlockStarted) {
-              const blockStop: ClaudeStreamContentBlockStop = {
-                type: 'content_block_stop',
-                index: 0,
-              };
-              const sseBlockStop = `event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`;
-              controller.enqueue(encoder.encode(sseBlockStop));
-              eventCount++;
-              console.log(`OpenAI Transform: Sending event #${eventCount} (${blockStop.type})`);
+              const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: 0 };
+              controller.enqueue(encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`));
               state.contentBlockStarted = false;
             }
-
             const messageDelta: ClaudeStreamMessageDelta = {
               type: 'message_delta',
-              delta: {
-                stop_reason: 'end_turn',
-                stop_sequence: null,
-              },
+              delta: { stop_reason: 'end_turn', stop_sequence: null },
               usage: { output_tokens: state.usage?.output_tokens || 0 },
             };
-            const sseDelta = `event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`;
-            controller.enqueue(encoder.encode(sseDelta));
-            eventCount++;
-            console.log(`OpenAI Transform: Sending event #${eventCount} (${messageDelta.type})`);
-
+            controller.enqueue(encoder.encode(`event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`));
             const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
-            const sseStop = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
-            controller.enqueue(encoder.encode(sseStop));
-            eventCount++;
-            console.log(`OpenAI Transform: Sending event #${eventCount} (${messageStop.type})`);
+            controller.enqueue(encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`));
             messageStopSent = true;
           }
-          // Claude doesn't use [DONE] marker itself; we already synthesized termination if needed
           continue;
         }
 
-        const openAIChunk = parsed.data as OpenAIStreamChunk;
-        if (!openAIChunk || typeof openAIChunk !== 'object') {
-          console.log('OpenAI Transform: Invalid chunk data');
-          continue;
-        }
-
-        console.log('OpenAI Transform: Converting OpenAI chunk:', openAIChunk);
-        const events = convertOpenAIChunkToClaude(openAIChunk, state);
-        console.log(`OpenAI Transform: Generated ${events.length} Claude events`);
-
-        for (const event of events) {
-          eventCount++;
-          const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-          console.log(`OpenAI Transform: Sending event #${eventCount} (${event.type})`);
-          controller.enqueue(encoder.encode(sseMessage));
-          if (event.type === 'message_stop') {
-            messageStopSent = true;
+        try {
+          const openAIChunk = JSON.parse(data) as OpenAIStreamChunk;
+          if (!openAIChunk || typeof openAIChunk !== 'object') continue;
+          const events = convertOpenAIChunkToClaude(openAIChunk, state);
+          for (const event of events) {
+            const payload = JSON.stringify(event);
+            if (lastEventByType[event.type] === payload) continue;
+            lastEventByType[event.type] = payload;
+            controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${payload}\n\n`));
+            if (event.type === 'message_stop') messageStopSent = true;
           }
+        } catch {
+          // ignore malformed json line
         }
       }
     },
 
     flush(controller) {
-      console.log('=== OpenAI Transform: Flush called ===');
-      console.log(`OpenAI Transform: Total chunks processed: ${chunkCount}`);
-      console.log(`OpenAI Transform: Total events sent: ${eventCount}`);
-      console.log(`OpenAI Transform: Buffer length: ${buffer.length}`);
-      console.log(
-        `OpenAI Transform: Buffer content: ${buffer.substring(0, 200)}${buffer.length > 200 ? '...' : ''}`
-      );
-
-      if (buffer.trim()) {
-        console.log('OpenAI Transform: Processing remaining buffer in flush');
-        let parsed = parseSSE(buffer);
-
-        // If normal parsing fails, try parsing incomplete SSE data
-        if (!parsed) {
-          console.log(
-            'OpenAI Transform: Normal parsing failed in flush, trying incomplete parsing'
-          );
-          parsed = parseIncompleteSSE(buffer);
-        }
-
-        if (parsed && !isDoneMessage(parsed)) {
-          const openAIChunk = parsed.data as OpenAIStreamChunk;
-          if (openAIChunk && typeof openAIChunk === 'object') {
-            console.log('OpenAI Transform: Processing chunk from flush buffer');
-            const events = convertOpenAIChunkToClaude(openAIChunk, state);
-            for (const event of events) {
-              const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-              controller.enqueue(encoder.encode(sseMessage));
-              if (event.type === 'message_stop') {
-                messageStopSent = true;
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data:')) {
+        const data = trimmed.slice(5).trim();
+        if (data && data !== '[DONE]') {
+          try {
+            const openAIChunk = JSON.parse(data) as OpenAIStreamChunk;
+            if (openAIChunk && typeof openAIChunk === 'object') {
+              const events = convertOpenAIChunkToClaude(openAIChunk, state);
+              for (const event of events) {
+                const payload = JSON.stringify(event);
+                if (lastEventByType[event.type] === payload) continue;
+                lastEventByType[event.type] = payload;
+                controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${payload}\n\n`));
+                if (event.type === 'message_stop') messageStopSent = true;
               }
             }
-
-            // Check if we need to force generate message_stop for completion
-            const hasFinish = events.some((e) => e.type === 'message_stop');
-            if (!hasFinish) {
-              const hasFinishReason = openAIChunk.choices?.some((choice) => choice.finish_reason);
-              if (hasFinishReason) {
-                console.log('OpenAI Transform: Force generating message_stop from flush');
-                const messageStop: ClaudeStreamMessageStop = {
-                  type: 'message_stop',
-                };
-                const sseMessage = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
-                controller.enqueue(encoder.encode(sseMessage));
-                messageStopSent = true;
-              }
-            }
+          } catch {
+            // ignore
           }
-        } else {
-          console.log('OpenAI Transform: No valid data in flush buffer');
         }
       }
 
-      // If upstream ended without a finish event and we haven't sent message_stop yet,
-      // synthesize a graceful termination.
       if (!messageStopSent) {
         if (state.contentBlockStarted) {
-          const blockStop: ClaudeStreamContentBlockStop = {
-            type: 'content_block_stop',
-            index: 0,
-          };
-          const sseBlockStop = `event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`;
-          controller.enqueue(encoder.encode(sseBlockStop));
+          const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: 0 };
+          controller.enqueue(encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`));
           state.contentBlockStarted = false;
         }
-
         const messageDelta: ClaudeStreamMessageDelta = {
           type: 'message_delta',
           delta: { stop_reason: 'end_turn', stop_sequence: null },
           usage: { output_tokens: state.usage?.output_tokens || 0 },
         };
-        const sseDelta = `event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`;
-        controller.enqueue(encoder.encode(sseDelta));
-
+        controller.enqueue(encoder.encode(`event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`));
         const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
-        const sseStop = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
-        controller.enqueue(encoder.encode(sseStop));
+        controller.enqueue(encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`));
         messageStopSent = true;
       }
     },

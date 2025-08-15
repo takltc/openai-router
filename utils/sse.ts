@@ -203,11 +203,12 @@ export function parseIncompleteSSE(incompleteData: string): ParsedSSEMessage | n
 export function createSSEParser(): TransformStream<Uint8Array, ParsedSSEMessage> {
   const decoder = new TextDecoder();
   let buffer = '';
+  const SPLIT = /\r?\n\r?\n/;
 
   return new TransformStream({
     transform(chunk: Uint8Array, controller) {
       buffer += decoder.decode(chunk, { stream: true });
-      const messages = buffer.split('\n\n');
+      const messages = buffer.split(SPLIT);
 
       // Keep the last incomplete message in the buffer
       buffer = messages.pop() || '';
@@ -294,7 +295,7 @@ export async function* parseSSEStream(response: Response): AsyncIterable<ParsedS
       }
 
       buffer += value;
-      const messages = buffer.split('\n\n');
+      const messages = buffer.split(/\r?\n\r?\n/);
       buffer = messages.pop() || '';
 
       for (const message of messages) {
