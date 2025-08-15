@@ -19,18 +19,14 @@ import type {
   OpenAIResponse,
   OpenAIMessage,
   OpenAIMessageContent,
-  OpenAITextContent,
   OpenAIImageContent,
   OpenAIToolCall,
   OpenAIStreamChunk,
-  OpenAIStreamDelta,
   OpenAIUsage,
   ClaudeResponse,
   ClaudeContent,
-  ClaudeTextContent,
   ClaudeImageContent,
   ClaudeToolUseContent,
-  ClaudeMessage,
   ClaudeStreamEvent,
   ClaudeStreamMessageStart,
   ClaudeStreamContentBlockStart,
@@ -39,8 +35,8 @@ import type {
   ClaudeStreamMessageDelta,
   ClaudeStreamMessageStop,
   ResponseConverter,
-  StreamConverter,
   StreamConversionState,
+  ClaudeError,
 } from './types';
 
 // Model mapping removed - now passing model names directly without conversion
@@ -115,7 +111,7 @@ function extractBase64FromDataUrl(dataUrl: string): { mediaType: string; data: s
 /**
  * Map media type to Claude supported format
  */
-function mapMediaType(mediaType: string): ClaudeImageContent['source']['media_type'] {
+function mapMediaType(mediaType: string): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
   const lowerMediaType = mediaType.toLowerCase();
 
   if (lowerMediaType.includes('jpeg') || lowerMediaType.includes('jpg')) {
@@ -141,6 +137,16 @@ function convertImageContent(content: OpenAIImageContent): ClaudeImageContent | 
   // Extract base64 data from URL
   const base64Data = extractBase64FromDataUrl(image_url.url);
   if (!base64Data) {
+    // If it's an HTTP(S) URL, pass through as Claude URL source
+    if (image_url.url.startsWith('http://') || image_url.url.startsWith('https://')) {
+      return {
+        type: 'image',
+        source: {
+          type: 'url',
+          url: image_url.url,
+        },
+      } as ClaudeImageContent;
+    }
     console.warn('Failed to extract base64 data from image URL');
     return null;
   }
@@ -348,7 +354,7 @@ interface OpenAIToClaudeStreamState extends StreamConversionState {
 /**
  * Convert OpenAI stream chunk to Claude stream event
  */
-export const formatStreamChunkOpenAI: StreamConverter<OpenAIStreamChunk, ClaudeStreamEvent[]> = (
+export const formatStreamChunkOpenAI = (
   chunk: OpenAIStreamChunk,
   state: OpenAIToClaudeStreamState
 ): ClaudeStreamEvent[] | null => {
@@ -619,17 +625,38 @@ export function parseAndConvertOpenAIStreamChunk(
 /**
  * Convert OpenAI error to Claude error format
  */
-export function convertOpenAIError(openAIError: any): any {
+export function convertOpenAIError(openAIError: unknown): ClaudeError {
   // Handle OpenAI error format
-  if (openAIError?.error) {
-    const error = openAIError.error;
-    return {
-      type: 'error',
-      error: {
-        type: error.type || error.code || 'api_error',
-        message: error.message || 'An error occurred',
-      },
-    };
+  if (typeof openAIError === 'object' && openAIError !== null) {
+    const maybeWrapped = (openAIError as { error?: unknown }).error;
+
+    if (typeof maybeWrapped === 'object' && maybeWrapped !== null) {
+      const wrapped = maybeWrapped as {
+        message?: unknown;
+        type?: unknown;
+        code?: unknown;
+      };
+
+      let typeValue: string;
+      if (typeof wrapped.type === 'string') {
+        typeValue = wrapped.type;
+      } else if (typeof wrapped.code === 'string') {
+        typeValue = wrapped.code;
+      } else {
+        typeValue = 'api_error';
+      }
+
+      const messageValue =
+        typeof wrapped.message === 'string' ? wrapped.message : 'An error occurred';
+
+      return {
+        type: 'error',
+        error: {
+          type: typeValue,
+          message: messageValue,
+        },
+      };
+    }
   }
 
   // Fallback for unexpected error formats
@@ -637,7 +664,10 @@ export function convertOpenAIError(openAIError: any): any {
     type: 'error',
     error: {
       type: 'api_error',
-      message: openAIError?.message || 'An error occurred',
+      message:
+        typeof (openAIError as { message?: unknown })?.message === 'string'
+          ? (openAIError as { message: string }).message
+          : 'An error occurred',
     },
   };
 }

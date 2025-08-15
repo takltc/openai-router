@@ -74,6 +74,15 @@ export function convertClaudeEventToOpenAI(
           arguments: '',
         };
 
+        // Assign a stable index for this tool call
+        if (!state.toolCallIdToIndex) state.toolCallIdToIndex = new Map<string, number>();
+        if (!state.nextToolCallIndex && state.nextToolCallIndex !== 0) state.nextToolCallIndex = 0;
+        if (!state.toolCallIdToIndex.has(state.currentToolCall.id)) {
+          const assignIndex = state.nextToolCallIndex ?? 0;
+          state.toolCallIdToIndex.set(state.currentToolCall.id, assignIndex);
+          state.nextToolCallIndex = assignIndex + 1;
+        }
+
         return {
           id: state.messageId,
           object: 'chat.completion.chunk',
@@ -85,7 +94,7 @@ export function convertClaudeEventToOpenAI(
               delta: {
                 tool_calls: [
                   {
-                    index: event.index,
+                    index: state.toolCallIdToIndex.get(state.currentToolCall.id) ?? 0,
                     id: state.currentToolCall.id,
                     type: 'function',
                     function: {
@@ -139,7 +148,8 @@ export function convertClaudeEventToOpenAI(
                 delta: {
                   tool_calls: [
                     {
-                      index: event.index,
+                      index:
+                        (state.currentToolCall?.id && state.toolCallIdToIndex?.get(state.currentToolCall.id)) ?? 0,
                       function: {
                         arguments: delta.partial_json,
                       },

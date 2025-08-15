@@ -11,11 +11,16 @@ import {
   createDoneMessage,
   isDoneMessage,
   parseIncompleteSSE,
-  enqueueSSE,
   createSSEParser,
 } from './sse';
 import { transformClaudeStreamToOpenAI } from './streamResponseClaude';
-import type { ClaudeStreamEvent, ParsedSSEMessage } from './types';
+import type {
+  ClaudeStreamEvent,
+  ParsedSSEMessage,
+  ClaudeStreamMessageStart,
+  ClaudeStreamContentBlockDelta,
+  ClaudeStreamMessageDelta,
+} from './types';
 
 // Mock完整的Claude SSE事件流
 const COMPLETE_CLAUDE_SSE_FLOW = [
@@ -75,17 +80,17 @@ describe('Claude SSE Integration Tests', () => {
       expect(parsedEvents[6].type).toBe('message_stop');
 
       // 验证具体事件数据
-      const messageStart = parsedEvents[0] as any;
+      const messageStart = parsedEvents[0] as ClaudeStreamMessageStart;
       expect(messageStart.message.id).toBe('msg_01ABC123');
       expect(messageStart.message.role).toBe('assistant');
 
-      const textDelta1 = parsedEvents[2] as any;
+      const textDelta1 = parsedEvents[2] as ClaudeStreamContentBlockDelta;
       expect(textDelta1.delta.text).toBe('Hello');
 
-      const textDelta2 = parsedEvents[3] as any;
+      const textDelta2 = parsedEvents[3] as ClaudeStreamContentBlockDelta;
       expect(textDelta2.delta.text).toBe(' world');
 
-      const messageDelta = parsedEvents[5] as any;
+      const messageDelta = parsedEvents[5] as ClaudeStreamMessageDelta;
       expect(messageDelta.delta.stop_reason).toBe('end_turn');
     });
   });

@@ -19,7 +19,6 @@ import type {
   OpenAIRequest,
   OpenAIMessage,
   OpenAIMessageContent,
-  OpenAITextContent,
   OpenAIImageContent,
   OpenAITool,
   OpenAIFunction,
@@ -27,16 +26,20 @@ import type {
   ClaudeRequest,
   ClaudeMessage,
   ClaudeContent,
-  ClaudeTextContent,
   ClaudeImageContent,
   ClaudeToolUseContent,
   ClaudeToolResultContent,
   ClaudeTool,
   ClaudeSystemMessage,
   RequestConverter,
+  OpenAIResponseFormat,
 } from './types';
 
 // Model mapping removed - now passing model names directly without conversion
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
 
 /**
  * Extract base64 data and media type from OpenAI image URL
@@ -51,11 +54,9 @@ function extractBase64FromImageUrl(url: string): { mediaType: string; data: stri
     };
   }
 
-  // For HTTP(S) URLs, we cannot directly convert them
-  // This would require fetching the image which is async
-  // Return null to indicate the image cannot be converted
+  // For HTTP(S) URLs: we'll pass through as Claude URL source later,
+  // so here we simply return null to indicate base64 not available
   if (url.startsWith('http://') || url.startsWith('https://')) {
-    console.warn(`Cannot convert HTTP URL to base64: ${url}`);
     return null;
   }
 
@@ -91,6 +92,16 @@ function convertImageContent(content: OpenAIImageContent): ClaudeImageContent | 
   const extracted = extractBase64FromImageUrl(image_url.url);
 
   if (!extracted) {
+    // If it's an HTTP(S) URL, pass through as Claude URL source
+    if (image_url.url.startsWith('http://') || image_url.url.startsWith('https://')) {
+      return {
+        type: 'image',
+        source: {
+          type: 'url',
+          url: image_url.url,
+        },
+      };
+    }
     return null;
   }
 
@@ -368,13 +379,26 @@ function convertTool(openAITool: OpenAITool | OpenAIFunction): ClaudeTool {
   // Handle both OpenAITool and OpenAIFunction formats
   const func = 'function' in openAITool ? openAITool.function : openAITool;
 
+  const parameterRecord = func.parameters as Record<string, unknown>;
+  const propsCandidate = (parameterRecord as { properties?: unknown }).properties;
+  const properties = isRecord(propsCandidate)
+    ? (propsCandidate as Record<string, unknown>)
+    : parameterRecord;
+  const requiredCandidate = (parameterRecord as { required?: unknown }).required;
+  const required =
+    Array.isArray(requiredCandidate) && requiredCandidate.every((x) => typeof x === 'string')
+      ? (requiredCandidate as string[])
+      : [];
+
   return {
     name: func.name,
     description: func.description || `Function ${func.name}`,
     input_schema: {
       type: 'object',
-      properties: (func.parameters.properties || func.parameters) as Record<string, unknown>,
-      required: (func.parameters.required || []) as string[],
+      properties,
+      required,
+      // Map OpenAI function.strict → additionalProperties: false when strict === true
+      ...(func.strict === true ? { additionalProperties: false } : {}),
     },
   };
 }
@@ -440,14 +464,11 @@ function mapModel(openAIModel: string): string {
  * @param model - The model name (unused in current implementation)
  * @returns Default max_tokens value of 4096
  */
-function calculateMaxTokens(model: string): number {
-  // Claude requires max_tokens to be specified
-  // Using a universal default value for all models to support flexibility
-  // If model-specific limits are needed in the future, they can be configured
-  // through external configuration rather than hardcoded checks
-
-  // Universal default for all models
-  return 4096;
+function calculateMaxTokens(): number {
+  // Default high ceiling to avoid premature truncation when caller omits max_tokens.
+  // Note: Upstream providers may clamp or reject if exceeding model limits.
+  // If needed, introduce model-specific caps via configuration.
+  return 262000; // ≈262K
 }
 
 /**
@@ -484,7 +505,7 @@ export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest>
   const claudeRequest: ClaudeRequest = {
     model: claudeModel,
     messages: validatedMessages,
-    max_tokens: request.max_tokens || calculateMaxTokens(claudeModel),
+    max_tokens: request.max_tokens || calculateMaxTokens(),
   };
 
   // Add system prompt if present
@@ -546,7 +567,8 @@ export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest>
     if (typeof request.function_call === 'string') {
       switch (request.function_call) {
         case 'none':
-          // Don't set tool_choice
+          // Explicitly disable tool usage by setting any tool_choice and omitting tools
+          delete claudeRequest.tools;
           break;
         case 'auto':
           claudeRequest.tool_choice = { type: 'auto' };
@@ -559,6 +581,40 @@ export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest>
         type: 'tool',
         name: request.function_call.name,
       };
+    }
+  }
+
+  // If tool_choice is explicitly 'none' in OpenAI format, ensure tools are not sent to Claude
+  if (request.tool_choice === 'none') {
+    delete claudeRequest.tools;
+    delete claudeRequest.tool_choice;
+  }
+
+  // Response format mapping
+  if (request.response_format) {
+    const rf = request.response_format as OpenAIResponseFormat;
+    if (rf.type === 'json_object') {
+      const jsonHint = 'Respond with a valid, strictly formatted JSON object only, no extra text.';
+      if (typeof claudeRequest.system === 'string') {
+        claudeRequest.system = `${claudeRequest.system}\n\n${jsonHint}`;
+      } else if (Array.isArray(claudeRequest.system)) {
+        claudeRequest.system = [...claudeRequest.system, { type: 'text', text: jsonHint }];
+      } else {
+        claudeRequest.system = jsonHint;
+      }
+    } else if (rf.type === 'json_schema') {
+      // Enforce schema via system instruction; Anthropic 无原生 json_schema 参数
+      const name = rf.json_schema?.name || 'json_schema';
+      const schema = rf.json_schema?.schema || {};
+      const strict = rf.json_schema?.strict === true;
+      const schemaHint = `You must return JSON that strictly conforms to the provided JSON Schema named "${name}". Strict: ${strict}. Schema: ${JSON.stringify(schema)}. No extra text.`;
+      if (typeof claudeRequest.system === 'string') {
+        claudeRequest.system = `${claudeRequest.system}\n\n${schemaHint}`;
+      } else if (Array.isArray(claudeRequest.system)) {
+        claudeRequest.system = [...claudeRequest.system, { type: 'text', text: schemaHint }];
+      } else {
+        claudeRequest.system = schemaHint;
+      }
     }
   }
 

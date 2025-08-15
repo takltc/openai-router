@@ -248,6 +248,8 @@ function initializeStreamState(
       input_tokens: event.message.usage.input_tokens,
       output_tokens: event.message.usage.output_tokens,
     },
+    toolCallIdToIndex: existingState?.toolCallIdToIndex || new Map<string, number>(),
+    nextToolCallIndex: existingState?.nextToolCallIndex ?? 0,
   };
 }
 
@@ -303,11 +305,13 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
         return chunk;
       } else if (block.type === 'tool_use') {
         // Start of tool use
-        state.currentToolCall = {
-          id: block.id!,
-          name: block.name!,
-          arguments: '',
-        };
+        state.currentToolCall = { id: block.id!, name: block.name!, arguments: '' };
+        if (!state.toolCallIdToIndex) state.toolCallIdToIndex = new Map();
+        if (state.toolCallIdToIndex && !state.toolCallIdToIndex.has(block.id!)) {
+          const assignIndex = state.nextToolCallIndex ?? 0;
+          state.toolCallIdToIndex.set(block.id!, assignIndex);
+          state.nextToolCallIndex = assignIndex + 1;
+        }
 
         const chunk: OpenAIStreamChunk = {
           id: state.messageId,
@@ -320,7 +324,7 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
               delta: {
                 tool_calls: [
                   {
-                    index: 0,
+                    index: state.toolCallIdToIndex?.get(block.id!) ?? 0,
                     id: block.id!,
                     type: 'function',
                     function: {
@@ -375,7 +379,9 @@ export const formatStreamChunkClaude: StreamConverter<ClaudeStreamEvent, OpenAIS
               delta: {
                 tool_calls: [
                   {
-                    index: 0,
+                    index:
+                      (state.currentToolCall?.id && state.toolCallIdToIndex?.get(state.currentToolCall.id)) ??
+                      0,
                     function: {
                       arguments: delta.partial_json || '',
                     },

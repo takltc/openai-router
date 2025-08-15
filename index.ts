@@ -11,12 +11,68 @@ import { formatResponseOpenAI } from './utils/formatResponseOpenAI';
 import { formatResponseClaude } from './utils/formatResponseClaude';
 import { createOpenAIToClaudeTransform } from './utils/streamResponseOpenAI';
 import { createClaudeToOpenAITransform } from './utils/streamResponseClaude';
+import { validateOpenAIToolCalls, fixOrphanedToolCalls } from './utils/validateToolCalls';
+import type { OpenAIRequest } from './utils/types';
 
 export interface Env {
   OPENAI_BASE_URL: string;
   ANTHROPIC_BASE_URL: string;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
+  VALIDATE_TOOL_CALLS?: 'off' | 'strict' | 'fix';
+  JSON_SCHEMA_VALIDATE?: 'true' | 'false' | '1' | '0';
+  DEFAULT_MAX_TOKENS_MAP?: string;
+  CLAUDE_DEFAULT_MAX_OUTPUT_TOKENS?: string;
+}
+
+// Helper: convert Headers to plain object without relying on entries() or iteration protocol
+function headersToObject(headers: Headers): Record<string, string> {
+  const obj: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    obj[key] = value;
+  });
+  return obj;
+}
+
+function computeDefaultMaxTokens(model: string, env: Env): number {
+  try {
+    if (env.DEFAULT_MAX_TOKENS_MAP) {
+      const map = JSON.parse(env.DEFAULT_MAX_TOKENS_MAP) as Record<string, number>;
+      if (map[model] && Number.isFinite(map[model])) {
+        return map[model];
+      }
+      const prefEntry = Object.entries(map).find(
+        ([key]) => key.endsWith('*') && model.startsWith(key.slice(0, -1))
+      );
+      if (prefEntry && Number.isFinite(prefEntry[1])) {
+        return prefEntry[1];
+      }
+    }
+  } catch {
+    // ignore parse errors
+  }
+
+  const globalDefault = Number(env.CLAUDE_DEFAULT_MAX_OUTPUT_TOKENS || '0');
+  if (Number.isFinite(globalDefault) && globalDefault > 0) {
+    return globalDefault;
+  }
+  return 262000;
+}
+
+// (Optional) JSON schema validation is deferred; lightweight impl removed to reduce bundle and lints
+
+function redactHeaders(headers: Headers): Record<string, string> {
+  const src = headersToObject(headers);
+  const result: Record<string, string> = {};
+  Object.keys(src).forEach((k) => {
+    const key = k.toLowerCase();
+    if (key === 'authorization' || key === 'x-api-key') {
+      result[k] = '***';
+    } else {
+      result[k] = src[k];
+    }
+  });
+  return result;
 }
 
 export default {
@@ -174,7 +230,7 @@ async function handleOpenAIToClaude(
         requestSummary: {
           method: request.method,
           url: request.url,
-          headers: Object.fromEntries(request.headers.entries()),
+          headers: redactHeaders(request.headers),
         },
       });
       throw new Error('Invalid JSON request body');
@@ -184,13 +240,43 @@ async function handleOpenAIToClaude(
       isStream,
       model: openAIRequest.model,
       messageCount: openAIRequest.messages?.length,
+      headers: redactHeaders(request.headers),
     });
 
+    // Optional: tool call validation/fixup
+    const validationMode = (env.VALIDATE_TOOL_CALLS as Env['VALIDATE_TOOL_CALLS']) || 'off';
+    if (validationMode !== 'off') {
+      const validation = validateOpenAIToolCalls(openAIRequest.messages || []);
+      if (!validation.valid) {
+        if (validationMode === 'strict') {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: 'Invalid tool_calls pairing',
+                type: 'invalid_request_error',
+                details: validation.errors,
+              },
+            }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (validationMode === 'fix') {
+          openAIRequest.messages = fixOrphanedToolCalls(openAIRequest.messages || []);
+        }
+      }
+    }
+
+    // Default max_tokens when absent
+    if (openAIRequest.max_tokens == null) {
+      openAIRequest.max_tokens = computeDefaultMaxTokens(openAIRequest.model, env);
+    }
+
     // Convert OpenAI request to Claude format
-    const claudeRequest = formatRequestClaude(openAIRequest);
+    const claudeRequest = formatRequestClaude(openAIRequest as OpenAIRequest);
     console.log('Claude request formatted:', {
       stream: claudeRequest.stream,
       model: claudeRequest.model,
+      max_tokens: claudeRequest.max_tokens,
     });
 
     // Prepare headers for Claude API
@@ -217,10 +303,7 @@ async function handleOpenAIToClaude(
     });
 
     console.log('Claude API response status:', claudeResponse.status, claudeResponse.statusText);
-    console.log(
-      'Claude API response headers:',
-      Object.fromEntries(claudeResponse.headers.entries())
-    );
+    console.log('Claude API response headers:', headersToObject(claudeResponse.headers));
 
     // Check if response is an error
     if (!claudeResponse.ok) {
@@ -236,7 +319,7 @@ async function handleOpenAIToClaude(
           responseSummary: {
             status: claudeResponse.status,
             statusText: claudeResponse.statusText,
-            headers: Object.fromEntries(claudeResponse.headers.entries()),
+            headers: headersToObject(claudeResponse.headers),
           },
         });
         errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
@@ -281,12 +364,67 @@ async function handleOpenAIToClaude(
           responseSummary: {
             status: claudeResponse.status,
             statusText: claudeResponse.statusText,
-            headers: Object.fromEntries(claudeResponse.headers.entries()),
+            headers: headersToObject(claudeResponse.headers),
           },
         });
         throw new Error('Failed to parse Claude API response');
       }
-      const openAIResponse = formatResponseClaude(claudeData);
+      const openAIResponse = formatResponseClaude(claudeData, openAIRequest as OpenAIRequest);
+
+      // Optional JSON schema validation (non-stream only)
+      if (env.JSON_SCHEMA_VALIDATE) {
+        const jsonSchemaValidate = String(env.JSON_SCHEMA_VALIDATE).toLowerCase();
+        if (jsonSchemaValidate === 'true' || jsonSchemaValidate === '1') {
+          const rf = (openAIRequest as OpenAIRequest).response_format as
+            | { type: 'json_schema'; json_schema?: { schema?: Record<string, unknown> } }
+            | undefined;
+          const msg = openAIResponse?.choices?.[0]?.message;
+          if (
+            rf &&
+            rf.type === 'json_schema' &&
+            rf.json_schema?.schema &&
+            msg &&
+            typeof msg.content === 'string'
+          ) {
+            try {
+              const parsed = JSON.parse(msg.content);
+              const schema = rf.json_schema.schema as { required?: string[]; type?: string };
+              const errors: string[] = [];
+              if (schema && schema.type === 'object') {
+                const req = Array.isArray(schema.required) ? schema.required : [];
+                for (const key of req) {
+                  if (!(key in (parsed as Record<string, unknown>))) {
+                    errors.push(`Missing required property: ${key}`);
+                  }
+                }
+              }
+              if (errors.length > 0) {
+                return new Response(
+                  JSON.stringify({
+                    error: {
+                      message: 'Response does not conform to provided json_schema',
+                      type: 'schema_validation_error',
+                      details: errors,
+                    },
+                  }),
+                  { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+                );
+              }
+            } catch (e) {
+              return new Response(
+                JSON.stringify({
+                  error: {
+                    message: 'Response is not valid JSON',
+                    type: 'schema_validation_error',
+                    details: [e instanceof Error ? e.message : String(e)],
+                  },
+                }),
+                { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+              );
+            }
+          }
+        }
+      }
 
       return new Response(JSON.stringify(openAIResponse), {
         status: claudeResponse.status,
@@ -303,7 +441,7 @@ async function handleOpenAIToClaude(
       requestSummary: {
         method: request.method,
         url: request.url,
-        headers: Object.fromEntries(request.headers.entries()),
+        headers: headersToObject(request.headers),
       },
     });
     return new Response(
@@ -344,7 +482,7 @@ async function handleClaudeToOpenAI(
         requestSummary: {
           method: request.method,
           url: request.url,
-          headers: Object.fromEntries(request.headers.entries()),
+          headers: headersToObject(request.headers),
         },
       });
       throw new Error('Invalid JSON request body');
@@ -432,7 +570,7 @@ async function handleClaudeToOpenAI(
           responseSummary: {
             status: openAIResponse.status,
             statusText: openAIResponse.statusText,
-            headers: Object.fromEntries(openAIResponse.headers.entries()),
+            headers: headersToObject(openAIResponse.headers),
           },
         });
         errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
@@ -450,7 +588,7 @@ async function handleClaudeToOpenAI(
     if (isStream && openAIResponse.body) {
       console.log('=== Starting OpenAI to Claude Stream Conversion ===');
       console.log('OpenAI response status:', openAIResponse.status);
-      console.log('OpenAI response headers:', Object.fromEntries(openAIResponse.headers.entries()));
+      console.log('OpenAI response headers:', headersToObject(openAIResponse.headers));
 
       // For stream, ensure upstream is SSE
       if (!contentType.includes('text/event-stream')) {
@@ -518,7 +656,7 @@ async function handleClaudeToOpenAI(
           responseSummary: {
             status: openAIResponse.status,
             statusText: openAIResponse.statusText,
-            headers: Object.fromEntries(openAIResponse.headers.entries()),
+            headers: headersToObject(openAIResponse.headers),
           },
         });
         throw new Error('Failed to parse OpenAI API response');
@@ -540,7 +678,7 @@ async function handleClaudeToOpenAI(
       requestSummary: {
         method: request.method,
         url: request.url,
-        headers: Object.fromEntries(request.headers.entries()),
+        headers: headersToObject(request.headers),
       },
     });
     return new Response(

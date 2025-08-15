@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { convertOpenAIChunkToClaude } from './streamResponseOpenAI';
-import type { OpenAIStreamChunk, StreamConversionState, ClaudeStreamEvent } from './types';
+import type {
+  OpenAIStreamChunk,
+  StreamConversionState,
+  ClaudeStreamContentBlockDelta,
+} from './types';
 
 describe('OpenAI to Claude content block management', () => {
   it('should only create one content_block_start for multiple content deltas', () => {
@@ -102,10 +106,12 @@ describe('OpenAI to Claude content block management', () => {
     const startToolEvent = events2.find((e) => e.type === 'content_block_start');
 
     expect(stopContentEvent).toBeDefined();
-    expect((stopContentEvent as any).index).toBe(0);
+    expect((stopContentEvent as { index: number }).index).toBe(0);
     expect(state.contentBlockStarted).toBe(false);
     expect(startToolEvent).toBeDefined();
-    expect((startToolEvent as any).content_block.type).toBe('tool_use');
+    expect((startToolEvent as { content_block: { type: string } }).content_block.type).toBe(
+      'tool_use'
+    );
   });
 
   it('should handle multi-segment text with paragraphs correctly', () => {

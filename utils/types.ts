@@ -146,14 +146,22 @@ export interface ClaudeTextContent {
   text: string;
 }
 
-export interface ClaudeImageContent {
-  type: 'image';
-  source: {
-    type: 'base64';
-    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
-    data: string;
-  };
-}
+export type ClaudeImageContent =
+  | {
+      type: 'image';
+      source: {
+        type: 'base64';
+        media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+        data: string;
+      };
+    }
+  | {
+      type: 'image';
+      source: {
+        type: 'url';
+        url: string;
+      };
+    };
 
 export interface ClaudeToolUseContent {
   type: 'tool_use';
@@ -193,6 +201,11 @@ export interface ClaudeTool {
     type: 'object';
     properties: Record<string, unknown>;
     required?: string[];
+    /**
+     * Whether extra properties outside the schema are allowed.
+     * Mapped from OpenAI function.strict === true → additionalProperties: false
+     */
+    additionalProperties?: boolean;
   };
 }
 
@@ -229,6 +242,30 @@ export interface ClaudeRequest {
     name?: string;
   };
 }
+
+// ================= OpenAI Response Format Types =================
+
+export interface OpenAIResponseFormatText {
+  type: 'text';
+}
+
+export interface OpenAIResponseFormatJsonObject {
+  type: 'json_object';
+}
+
+export interface OpenAIResponseFormatJsonSchema {
+  type: 'json_schema';
+  json_schema: {
+    name: string;
+    schema: Record<string, unknown>;
+    strict?: boolean;
+  };
+}
+
+export type OpenAIResponseFormat =
+  | OpenAIResponseFormatText
+  | OpenAIResponseFormatJsonObject
+  | OpenAIResponseFormatJsonSchema;
 
 /**
  * Claude response format
@@ -456,6 +493,14 @@ export interface StreamConversionState {
     output_tokens: number;
   };
   contentBlockStarted?: boolean;
+  /**
+   * Mapping of tool_use id → OpenAI tool_calls index during streaming conversion
+   */
+  toolCallIdToIndex?: Map<string, number>;
+  /**
+   * Next available OpenAI tool_calls index when a new tool_use appears
+   */
+  nextToolCallIndex?: number;
 }
 
 /**

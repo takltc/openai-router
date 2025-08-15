@@ -3,7 +3,7 @@
  * Helps prevent API errors by ensuring all tool_calls have corresponding results
  */
 
-import type { OpenAIMessage, ClaudeMessage, ClaudeContent } from './types';
+import type { OpenAIMessage, ClaudeMessage } from './types';
 
 /**
  * Validate that all tool_calls in OpenAI messages have corresponding tool results
@@ -16,7 +16,7 @@ export function validateOpenAIToolCalls(messages: OpenAIMessage[]): {
   const toolCallIds = new Set<string>();
   const toolResultIds = new Set<string>();
 
-  messages.forEach((msg, index) => {
+  messages.forEach((msg) => {
     // Collect tool_calls from assistant messages
     if (msg.role === 'assistant' && msg.tool_calls) {
       msg.tool_calls.forEach((tc) => {

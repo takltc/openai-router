@@ -13,10 +13,9 @@ import {
   convertOpenAIError,
   __testing,
 } from './formatResponseOpenAI';
-import type { OpenAIResponse, OpenAIStreamChunk, ClaudeResponse, ClaudeStreamEvent } from './types';
+import type { OpenAIResponse, OpenAIStreamChunk } from './types';
 
 const {
-  generateClaudeId,
   mapFinishReasonToStopReason,
   convertUsage,
   extractBase64FromDataUrl,
@@ -334,7 +333,7 @@ describe('formatResponseOpenAI', () => {
               content: 'Hello from OpenAI!',
             },
             finish_reason: 'stop',
-            logprobs: null,
+            // logprobs intentionally omitted to align with type expectations
           },
         ],
         usage: {
@@ -385,7 +384,7 @@ describe('formatResponseOpenAI', () => {
               ],
             },
             finish_reason: 'tool_calls',
-            logprobs: null,
+            // logprobs intentionally omitted to align with type expectations
           },
         ],
       };

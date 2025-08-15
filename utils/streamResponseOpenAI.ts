@@ -19,7 +19,6 @@ import {
   enqueueSSE,
   parseSSE,
   isDoneMessage,
-  createDoneMessage,
   parseIncompleteSSE,
   enqueueErrorAndDone,
 } from './sse';
@@ -380,6 +379,7 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
   let buffer = '';
   let chunkCount = 0;
   let eventCount = 0;
+  let messageStopSent = false;
 
   console.log('=== OpenAI to Claude Transform Stream Created ===');
 
@@ -417,7 +417,43 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
         console.log('OpenAI Transform: Parsed SSE:', parsed);
         if (isDoneMessage(parsed)) {
           console.log('OpenAI Transform: [DONE] message received');
-          // Claude doesn't use [DONE]
+          // If upstream did not include a final finish_reason chunk,
+          // synthesize a graceful termination for Claude clients.
+          if (!messageStopSent) {
+            // Close any open content block
+            if (state.contentBlockStarted) {
+              const blockStop: ClaudeStreamContentBlockStop = {
+                type: 'content_block_stop',
+                index: 0,
+              };
+              const sseBlockStop = `event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`;
+              controller.enqueue(encoder.encode(sseBlockStop));
+              eventCount++;
+              console.log(`OpenAI Transform: Sending event #${eventCount} (${blockStop.type})`);
+              state.contentBlockStarted = false;
+            }
+
+            const messageDelta: ClaudeStreamMessageDelta = {
+              type: 'message_delta',
+              delta: {
+                stop_reason: 'end_turn',
+                stop_sequence: null,
+              },
+              usage: { output_tokens: state.usage?.output_tokens || 0 },
+            };
+            const sseDelta = `event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`;
+            controller.enqueue(encoder.encode(sseDelta));
+            eventCount++;
+            console.log(`OpenAI Transform: Sending event #${eventCount} (${messageDelta.type})`);
+
+            const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
+            const sseStop = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
+            controller.enqueue(encoder.encode(sseStop));
+            eventCount++;
+            console.log(`OpenAI Transform: Sending event #${eventCount} (${messageStop.type})`);
+            messageStopSent = true;
+          }
+          // Claude doesn't use [DONE] marker itself; we already synthesized termination if needed
           continue;
         }
 
@@ -436,6 +472,9 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
           const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
           console.log(`OpenAI Transform: Sending event #${eventCount} (${event.type})`);
           controller.enqueue(encoder.encode(sseMessage));
+          if (event.type === 'message_stop') {
+            messageStopSent = true;
+          }
         }
       }
     },
@@ -469,6 +508,9 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
             for (const event of events) {
               const sseMessage = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
               controller.enqueue(encoder.encode(sseMessage));
+              if (event.type === 'message_stop') {
+                messageStopSent = true;
+              }
             }
 
             // Check if we need to force generate message_stop for completion
@@ -482,12 +524,40 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
                 };
                 const sseMessage = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
                 controller.enqueue(encoder.encode(sseMessage));
+                messageStopSent = true;
               }
             }
           }
         } else {
           console.log('OpenAI Transform: No valid data in flush buffer');
         }
+      }
+
+      // If upstream ended without a finish event and we haven't sent message_stop yet,
+      // synthesize a graceful termination.
+      if (!messageStopSent) {
+        if (state.contentBlockStarted) {
+          const blockStop: ClaudeStreamContentBlockStop = {
+            type: 'content_block_stop',
+            index: 0,
+          };
+          const sseBlockStop = `event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`;
+          controller.enqueue(encoder.encode(sseBlockStop));
+          state.contentBlockStarted = false;
+        }
+
+        const messageDelta: ClaudeStreamMessageDelta = {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: state.usage?.output_tokens || 0 },
+        };
+        const sseDelta = `event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`;
+        controller.enqueue(encoder.encode(sseDelta));
+
+        const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
+        const sseStop = `event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`;
+        controller.enqueue(encoder.encode(sseStop));
+        messageStopSent = true;
       }
     },
   });

@@ -145,3 +145,6 @@ dist
 # Claude
 .claude/
 CLAUDE.md
+
+# Qwen
+QWEN.md
