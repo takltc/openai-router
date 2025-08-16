@@ -393,6 +393,59 @@ function clampOpenAIMessages(messages: OpenAIMessage[], maxChars: number): OpenA
   });
 }
 
+function enforceTotalCharBudget(messages: OpenAIMessage[], budget: number): OpenAIMessage[] {
+  let remaining = Math.max(1, budget);
+  const result: OpenAIMessage[] = [];
+
+  for (const m of messages) {
+    const next: OpenAIMessage = { ...m };
+    if (typeof next.content === 'string') {
+      const t = next.content as string;
+      if (t.length <= remaining) {
+        remaining -= t.length;
+      } else {
+        next.content = t.slice(0, remaining);
+        remaining = 0;
+      }
+    } else if (Array.isArray(next.content)) {
+      const arr = (next.content as (OpenAITextContent | OpenAIImageContent)[]).map((c) => {
+        if (remaining <= 0) return c.type === 'text' ? { ...c, text: '' } : c;
+        if (c.type === 'text') {
+          const len = c.text.length;
+          if (len <= remaining) {
+            remaining -= len;
+            return c;
+          }
+          const trimmed = c.text.slice(0, remaining);
+          remaining = 0;
+          return { ...c, text: trimmed } as OpenAITextContent;
+        }
+        return c;
+      });
+      next.content = arr;
+    }
+    result.push(next);
+  }
+
+  // Ensure at least 1 visible char overall
+  if (budget > 0) {
+    const hasAnyChar = result.some((m) => {
+      if (typeof m.content === 'string') return (m.content as string).length > 0;
+      if (Array.isArray(m.content))
+        return (m.content as (OpenAITextContent | OpenAIImageContent)[]).some(
+          (c) => c.type === 'text' && (c as OpenAITextContent).text.length > 0
+        );
+      return false;
+    });
+    if (!hasAnyChar) {
+      // Prepend minimal user input
+      result.unshift({ role: 'user', content: '.' });
+    }
+  }
+
+  return result;
+}
+
 /**
  * Ensure OpenAI messages meet minimal input requirements
  * - Remove empty text fragments
@@ -487,7 +540,10 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
   // Build OpenAI request
   const openAIRequest: OpenAIRequest = {
     model: mapModel(request.model),
-    messages: clampOpenAIMessages(sanitizeOpenAIMessages(messages), 120000),
+    messages: enforceTotalCharBudget(
+      clampOpenAIMessages(sanitizeOpenAIMessages(messages), 120000),
+      129000
+    ),
   };
 
   // Map temperature (same range for both APIs: 0-2 for Claude, 0-2 for OpenAI)
