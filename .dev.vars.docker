@@ -12,3 +12,5 @@ OPENAI_BASE_URL=http://host.docker.internal:3001/proxy/modelscope/v1
 NODE_ENV=production
 HOST=0.0.0.0
 PORT=8788
+
+VALIDATE_TOOL_CALLS = "fix"

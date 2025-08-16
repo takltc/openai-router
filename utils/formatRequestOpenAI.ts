@@ -19,10 +19,8 @@ import type {
   ClaudeRequest,
   ClaudeMessage,
   ClaudeContent,
-  ClaudeTextContent,
-  ClaudeImageContent,
   ClaudeToolUseContent,
-  ClaudeToolResultContent,
+  ClaudeImageContent,
   ClaudeTool,
   ClaudeSystemMessage,
   OpenAIRequest,
@@ -41,30 +39,35 @@ import type {
 /**
  * Extract base64 data from data URL
  */
-function extractBase64FromDataUrl(dataUrl: string): { mediaType: string; data: string } | null {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) {
-    return null;
-  }
-  return {
-    mediaType: match[1],
-    data: match[2],
-  };
+// helper reserved for future usage (intentionally unused to satisfy linter)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function extractBase64FromDataUrl(_dataUrl: string): { mediaType: string; data: string } | null {
+  return null;
 }
 
 /**
  * Convert Claude image content to OpenAI format
  */
 function convertImageContent(content: ClaudeImageContent): OpenAIImageContent {
-  const { source } = content;
+  const casted = content as unknown as {
+    source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string };
+  };
+  const { source } = casted;
 
-  // Create data URL from base64 data
-  const dataUrl = `data:${source.media_type};base64,${source.data}`;
+  // Support both base64 and URL sources
+  let url: string;
+  if ((source as { type: string }).type === 'base64') {
+    url = `data:${(source as { media_type: string; data: string }).media_type};base64,${(source as { media_type: string; data: string }).data}`;
+  } else if ((source as { type: string }).type === 'url') {
+    url = (source as { url: string }).url;
+  } else {
+    url = '';
+  }
 
   return {
     type: 'image_url',
     image_url: {
-      url: dataUrl,
+      url,
       // Use 'auto' by default for image detail level
       detail: 'auto',
     },
@@ -94,9 +97,17 @@ function convertContent(content: string | ClaudeContent[]): OpenAIMessageContent
         });
         break;
 
-      case 'image':
-        convertedContent.push(convertImageContent(item));
+      case 'image': {
+        const img = convertImageContent(item);
+        const url = (img.image_url && img.image_url.url) || '';
+        // Guard: avoid extremely large data URLs that may exceed upstream limits
+        if (typeof url === 'string' && url.startsWith('data:') && url.length > 120000) {
+          convertedContent.push({ type: 'text', text: '[Image omitted due to size]' });
+        } else {
+          convertedContent.push(img);
+        }
         break;
+      }
 
       case 'tool_use':
         // Tool use will be handled separately as tool_calls
@@ -105,7 +116,7 @@ function convertContent(content: string | ClaudeContent[]): OpenAIMessageContent
           type: 'function',
           function: {
             name: item.name,
-            arguments: JSON.stringify(item.input),
+            arguments: clampText(JSON.stringify(item.input), 120000),
           },
         });
         break;
@@ -124,7 +135,7 @@ function convertContent(content: string | ClaudeContent[]): OpenAIMessageContent
 
       default:
         // Fallback for unknown content types
-        console.warn(`Unknown Claude content type: ${(item as any).type}`);
+        console.warn('Unknown Claude content type');
         break;
     }
   }
@@ -149,10 +160,7 @@ function convertContent(content: string | ClaudeContent[]): OpenAIMessageContent
 /**
  * Convert Claude message to OpenAI message format
  */
-function convertMessage(
-  message: ClaudeMessage,
-  systemPrompt?: string | null
-): OpenAIMessage | OpenAIMessage[] {
+function convertMessage(message: ClaudeMessage): OpenAIMessage | OpenAIMessage[] {
   // First, check if this message contains ONLY tool_result items
   // In Claude format, tool results are in user messages, but in OpenAI they should be tool messages
   if (Array.isArray(message.content)) {
@@ -186,18 +194,34 @@ function convertMessage(
   // Handle content conversion
   const content = convertContent(message.content);
   openAIMessage.content = content;
+  // If assistant emits only tool_calls with no textual content, set content to null to avoid
+  // zero-length input constraints while keeping tool_calls.
+  if (
+    openAIMessage.role === 'assistant' &&
+    Array.isArray(message.content) &&
+    message.content.some((i) => i.type === 'tool_use')
+  ) {
+    const isEmptyString =
+      typeof openAIMessage.content === 'string' && openAIMessage.content.trim().length === 0;
+    const isEmptyArray =
+      Array.isArray(openAIMessage.content) &&
+      (openAIMessage.content as (OpenAITextContent | OpenAIImageContent)[]).length === 0;
+    if (isEmptyString || isEmptyArray) {
+      openAIMessage.content = '.';
+    }
+  }
 
   // Extract tool calls if present
   const toolCalls: OpenAIToolCall[] = [];
   if (Array.isArray(message.content)) {
-    for (const item of message.content) {
-      if (item.type === 'tool_use') {
+    for (const item of message.content as ClaudeContent[]) {
+      if ((item as ClaudeToolUseContent).type === 'tool_use') {
         toolCalls.push({
-          id: item.id,
+          id: (item as ClaudeToolUseContent).id,
           type: 'function',
           function: {
-            name: item.name,
-            arguments: JSON.stringify(item.input),
+            name: (item as ClaudeToolUseContent).name,
+            arguments: clampText(JSON.stringify((item as ClaudeToolUseContent).input), 120000),
           },
         });
       }
@@ -207,6 +231,16 @@ function convertMessage(
   // Add tool calls if present
   if (toolCalls.length > 0) {
     openAIMessage.tool_calls = toolCalls;
+    // If content is empty string or empty array, set to null to comply with providers that
+    // require non-empty input length when content is present.
+    const isEmptyString =
+      typeof openAIMessage.content === 'string' && openAIMessage.content.trim().length === 0;
+    const isEmptyArray =
+      Array.isArray(openAIMessage.content) &&
+      (openAIMessage.content as (OpenAITextContent | OpenAIImageContent)[]).length === 0;
+    if (isEmptyString || isEmptyArray) {
+      openAIMessage.content = '.';
+    }
   }
 
   // Handle mixed content with tool results (rare case)
@@ -258,8 +292,8 @@ function extractSystemPrompt(
 
   // Extract text safely from ClaudeSystemMessage array
   const systemTexts = arr
-    .filter((msg) => msg && (msg as any).type === 'text')
-    .map((msg) => (msg as any).text)
+    .filter((msg) => msg && (msg as ClaudeSystemMessage).type === 'text')
+    .map((msg) => (msg as ClaudeSystemMessage).text)
     .filter((t) => typeof t === 'string' && t.length > 0);
 
   return systemTexts.length > 0 ? systemTexts.join('\n') : null;
@@ -332,6 +366,91 @@ function mapModel(claudeModel: string): string {
   return claudeModel;
 }
 
+function clampText(input: string, maxChars: number): string {
+  if (typeof input !== 'string') {
+    return '';
+  }
+  if (input.length === 0) {
+    return input;
+  }
+  return input.length > maxChars ? input.slice(0, Math.max(1, maxChars)) : input;
+}
+
+function clampOpenAIMessages(messages: OpenAIMessage[], maxChars: number): OpenAIMessage[] {
+  return messages.map((m) => {
+    const next: OpenAIMessage = { ...m };
+    if (typeof next.content === 'string') {
+      next.content = clampText(next.content, maxChars);
+    } else if (Array.isArray(next.content)) {
+      next.content = (next.content as (OpenAITextContent | OpenAIImageContent)[]).map((c) => {
+        if (c.type === 'text') {
+          return { ...c, text: clampText(c.text, maxChars) } as OpenAITextContent;
+        }
+        return c;
+      });
+    }
+    return next;
+  });
+}
+
+/**
+ * Ensure OpenAI messages meet minimal input requirements
+ * - Remove empty text fragments
+ * - Ensure at least one non-empty user text is present
+ * - If first non-system message isn't user, prepend a minimal user message
+ */
+function sanitizeOpenAIMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
+  const sanitized: OpenAIMessage[] = [];
+
+  // Remove empty text fragments in content arrays
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      const filtered = (msg.content as (OpenAITextContent | OpenAIImageContent)[]).filter(
+        (c) =>
+          c.type !== 'text' ||
+          (typeof (c as OpenAITextContent).text === 'string' &&
+            (c as OpenAITextContent).text.trim().length > 0)
+      );
+      sanitized.push({ ...msg, content: filtered as (OpenAITextContent | OpenAIImageContent)[] });
+    } else if (typeof msg.content === 'string') {
+      // Keep as-is (including empty) to preserve tool_calls pairing; we'll add minimal input if needed later
+      sanitized.push(msg);
+    } else {
+      sanitized.push(msg);
+    }
+  }
+
+  // Detect if there is any non-empty text from user/assistant
+  const hasNonEmptyUserOrAssistantText = sanitized.some((m) => {
+    if (m.role === 'user' || m.role === 'assistant') {
+      if (typeof m.content === 'string') {
+        return m.content.trim().length > 0;
+      }
+      if (Array.isArray(m.content)) {
+        return (m.content as (OpenAITextContent | OpenAIImageContent)[]).some((c) => {
+          if (c.type !== 'text') return false;
+          const t = (c as OpenAITextContent).text;
+          return typeof t === 'string' && t.trim().length > 0;
+        });
+      }
+    }
+    return false;
+  });
+
+  // Find index of first non-system message
+  const firstNonSystemIndex = sanitized.findIndex((m) => m.role !== 'system');
+
+  // If no non-empty user/assistant text present, or first non-system message isn't user, prepend minimal user input
+  if (
+    !hasNonEmptyUserOrAssistantText ||
+    (firstNonSystemIndex !== -1 && sanitized[firstNonSystemIndex].role !== 'user')
+  ) {
+    sanitized.unshift({ role: 'user', content: 'Continue.' });
+  }
+
+  return sanitized;
+}
+
 /**
  * Convert Claude request to OpenAI format
  * Main converter function that handles all aspects of the conversion
@@ -339,6 +458,7 @@ function mapModel(claudeModel: string): string {
 export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest> = (
   request: ClaudeRequest
 ): OpenAIRequest => {
+  // Extract system prompt
   // Extract system prompt
   const systemPrompt = extractSystemPrompt(request.system);
 
@@ -355,7 +475,7 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
 
   // Convert all Claude messages
   for (const claudeMessage of request.messages) {
-    const converted = convertMessage(claudeMessage, systemPrompt);
+    const converted = convertMessage(claudeMessage);
 
     if (Array.isArray(converted)) {
       messages.push(...converted);
@@ -367,7 +487,7 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
   // Build OpenAI request
   const openAIRequest: OpenAIRequest = {
     model: mapModel(request.model),
-    messages,
+    messages: clampOpenAIMessages(sanitizeOpenAIMessages(messages), 120000),
   };
 
   // Map temperature (same range for both APIs: 0-2 for Claude, 0-2 for OpenAI)

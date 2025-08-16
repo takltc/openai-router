@@ -650,6 +650,30 @@ async function handleClaudeToOpenAI(
       );
     }
 
+    // Optional: validate/fix tool_calls pairing before sending to OpenAI
+    const validationMode2 = (env.VALIDATE_TOOL_CALLS as Env['VALIDATE_TOOL_CALLS']) || 'off';
+    if (validationMode2 !== 'off') {
+      const validation = validateOpenAIToolCalls(openAIRequest.messages || []);
+      if (!validation.valid) {
+        if (validationMode2 === 'strict') {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message:
+                  'Invalid tool_calls pairing: An assistant message with tool_calls must be followed by corresponding tool messages',
+                type: 'invalid_request_error',
+                details: validation.errors,
+              },
+            }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (validationMode2 === 'fix') {
+          openAIRequest.messages = fixOrphanedToolCalls(openAIRequest.messages || []);
+        }
+      }
+    }
+
     // Prepare headers for OpenAI API
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');

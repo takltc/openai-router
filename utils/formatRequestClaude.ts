@@ -438,6 +438,39 @@ function convertToolChoice(
 }
 
 /**
+ * Remove empty-content messages and trim redundant empty text blocks
+ * Ensures each Claude message contributes at least 1 character of input when required
+ */
+function sanitizeClaudeMessages(messages: ClaudeMessage[]): ClaudeMessage[] {
+  const sanitized: ClaudeMessage[] = [];
+  for (const msg of messages) {
+    const content = msg.content as unknown;
+    // String content
+    if (typeof content === 'string') {
+      if (content.trim().length > 0) {
+        sanitized.push(msg);
+      }
+      continue;
+    }
+
+    // Array content
+    if (Array.isArray(content)) {
+      const filtered = content.filter((c) =>
+        c.type !== 'text' || (typeof (c as any).text === 'string' && (c as any).text.trim().length > 0)
+      );
+      if (filtered.length > 0) {
+        sanitized.push({ ...msg, content: filtered });
+      }
+      continue;
+    }
+
+    // Unknown content type: keep as-is
+    sanitized.push(msg);
+  }
+  return sanitized;
+}
+
+/**
  * Map OpenAI model to Claude model
  *
  * Current implementation: Direct pass-through without any conversion.
@@ -491,12 +524,21 @@ export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest>
     }
   }
 
+  // Remove empty-content messages to satisfy upstream minimum length constraints
+  const sanitizedMessages = sanitizeClaudeMessages(claudeMessages);
+
   // Ensure every tool_use has matching tool_result
-  const completedMessages = ensureToolResultCoverage(claudeMessages);
+  const completedMessages = ensureToolResultCoverage(sanitizedMessages);
 
   // Ensure messages alternate between user and assistant
   // Claude requires this strict alternation
   const validatedMessages = validateMessageAlternation(completedMessages);
+
+  // Ensure there is at least one user message
+  const finalMessages =
+    validatedMessages.length === 0
+      ? ([{ role: 'user', content: 'Continue.' }] as ClaudeMessage[])
+      : validatedMessages;
 
   // Map model
   const claudeModel = mapModel(request.model);
@@ -504,7 +546,7 @@ export const formatRequestClaude: RequestConverter<OpenAIRequest, ClaudeRequest>
   // Build Claude request
   const claudeRequest: ClaudeRequest = {
     model: claudeModel,
-    messages: validatedMessages,
+    messages: finalMessages,
     max_tokens: request.max_tokens || calculateMaxTokens(),
   };
 
