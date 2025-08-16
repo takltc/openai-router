@@ -637,6 +637,72 @@ export function enforceTotalTokenBudget(
   return result;
 }
 
+function ensureToolCallAdjacency(messages: OpenAIMessage[]): OpenAIMessage[] {
+  const arr = [...messages];
+
+  for (let i = 0; i < arr.length; i++) {
+    const msg = arr[i];
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const neededIds = new Set((msg.tool_calls as OpenAIToolCall[]).map((tc) => tc.id));
+
+      // Count immediate matching tool messages
+      let insertPos = i + 1;
+      let k = i + 1;
+      while (k < arr.length && arr[k].role === 'tool') {
+        const tm = arr[k];
+        const id = (tm as OpenAIMessage & { tool_call_id?: string }).tool_call_id;
+        if (id && neededIds.has(id)) {
+          neededIds.delete(id);
+          insertPos = k + 1;
+          k++;
+          continue;
+        }
+        break; // stop at first non-matching immediate tool message
+      }
+
+      // Search for additional matching tool messages later
+      const toMoveIndices: number[] = [];
+      for (let p = k; p < arr.length; p++) {
+        const tm = arr[p];
+        if (tm.role !== 'tool') continue;
+        const id = (tm as OpenAIMessage & { tool_call_id?: string }).tool_call_id;
+        if (id && neededIds.has(id)) {
+          toMoveIndices.push(p);
+          neededIds.delete(id);
+        }
+      }
+
+      // Move found tool messages to be adjacent after current assistant
+      if (toMoveIndices.length > 0) {
+        const moved: OpenAIMessage[] = [];
+        for (let idx = toMoveIndices.length - 1; idx >= 0; idx--) {
+          const p = toMoveIndices[idx];
+          const [tm] = arr.splice(p, 1);
+          moved.unshift(tm);
+        }
+        arr.splice(insertPos, 0, ...moved);
+        insertPos += moved.length;
+      }
+
+      // Insert placeholders for any still-missing ids
+      if (neededIds.size > 0) {
+        const placeholders: OpenAIMessage[] = [];
+        neededIds.forEach((id) => {
+          placeholders.push({
+            role: 'tool',
+            // Casting to allow tool_call_id on tool role
+            tool_call_id: id as unknown as string,
+            content: '.',
+          } as OpenAIMessage);
+        });
+        arr.splice(insertPos, 0, ...placeholders);
+      }
+    }
+  }
+
+  return arr;
+}
+
 /**
  * Ensure OpenAI messages meet minimal input requirements
  * - Remove empty text fragments
@@ -728,8 +794,10 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
     }
   }
 
-  // Build OpenAI request
-  const sanitized = sanitizeOpenAIMessages(messages);
+  // Adjust tool message adjacency and add placeholders if needed
+  const adjusted = ensureToolCallAdjacency(messages);
+
+  const sanitized = sanitizeOpenAIMessages(adjusted);
   const clampedChars = clampOpenAIMessages(sanitized, 120000);
   const tokenBudgeted = enforceTotalTokenBudget(clampedChars, 129000, mapModel(request.model));
   const openAIRequest: OpenAIRequest = {
