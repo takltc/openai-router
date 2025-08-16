@@ -393,6 +393,7 @@ function clampOpenAIMessages(messages: OpenAIMessage[], maxChars: number): OpenA
   });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function enforceTotalCharBudget(messages: OpenAIMessage[], budget: number): OpenAIMessage[] {
   let remaining = Math.max(1, budget);
   const result: OpenAIMessage[] = [];
@@ -440,6 +441,196 @@ function enforceTotalCharBudget(messages: OpenAIMessage[], budget: number): Open
     if (!hasAnyChar) {
       // Prepend minimal user input
       result.unshift({ role: 'user', content: '.' });
+    }
+  }
+
+  return result;
+}
+
+function findGoodBoundary(text: string): number {
+  if (text.length <= 1) return text.length;
+  const windowStart = Math.max(0, text.length - 120);
+  const tail = text.slice(windowStart);
+  const patterns = [/([\.\!\?。！？][\s\n\r])/g, /([\n\r])/g, /(\s)/g];
+  let bestIndex = -1;
+  for (const re of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(tail)) !== null) {
+      bestIndex = windowStart + match.index + (re === patterns[0] ? 1 : 0);
+    }
+    if (bestIndex >= 0) break;
+  }
+  return bestIndex >= 0 ? bestIndex : text.length;
+}
+
+// Token encoder helper with graceful fallback if tiktoken is unavailable
+interface TokenEncoder {
+  encode: (text: string) => number[];
+  decode: (tokens: number[]) => string;
+}
+
+// modelName reserved for future model-specific heuristics
+function getTokenEncoder(): TokenEncoder {
+  const approxEncode = (text: string): number[] => {
+    if (!text) return [];
+    const parts = text.match(/\w+|[^\s\w]/g) || [];
+    return parts.map((_, idx) => idx + 1);
+  };
+  const approxDecode = (tokens: number[]): string => {
+    const len = Array.isArray(tokens) ? tokens.length : 0;
+    if (len <= 0) return '';
+    return '.'.repeat(Math.min(len, 10));
+  };
+  return { encode: approxEncode, decode: approxDecode };
+}
+
+function smartTrimByTokens(enc: TokenEncoder, text: string, tokensAllowed: number): string {
+  if (tokensAllowed <= 0) return '';
+  const tokens = enc.encode(text);
+  if (tokens.length <= tokensAllowed) return text;
+  const slice = tokens.slice(0, Math.max(1, tokensAllowed));
+  const decoded = enc.decode(slice);
+  const cut = findGoodBoundary(decoded);
+  const trimmed = decoded.slice(0, Math.max(1, cut));
+  return trimmed.length > 0 ? trimmed : '.';
+}
+
+function groupMessagesForBudget(messages: OpenAIMessage[]): OpenAIMessage[][] {
+  const groups: OpenAIMessage[][] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const group: OpenAIMessage[] = [msg];
+      let j = i + 1;
+      while (j < messages.length && messages[j].role === 'tool') {
+        group.push(messages[j]);
+        j++;
+      }
+      groups.push(group);
+      i = j - 1;
+    } else {
+      groups.push([msg]);
+    }
+  }
+  return groups;
+}
+
+function countMessageTokens(enc: TokenEncoder, m: OpenAIMessage): number {
+  let tokens = 0;
+  if (typeof m.content === 'string') {
+    tokens += enc.encode(m.content).length;
+  } else if (Array.isArray(m.content)) {
+    for (const c of m.content as (OpenAITextContent | OpenAIImageContent)[]) {
+      if (c.type === 'text') tokens += enc.encode(c.text).length;
+      else if (c.type === 'image_url') tokens += enc.encode(c.image_url.url || '').length;
+    }
+  }
+  if (m.tool_calls && Array.isArray(m.tool_calls)) {
+    for (const tc of m.tool_calls as Array<{ function: { name: string; arguments: string } }>) {
+      tokens += enc.encode(tc.function.name).length;
+      tokens += enc.encode(tc.function.arguments || '').length;
+    }
+  }
+  return tokens;
+}
+
+export function enforceTotalTokenBudget(
+  messages: OpenAIMessage[],
+  budgetTokens: number,
+  /* eslint-disable @typescript-eslint/no-unused-vars */ _unusedModel: string
+): OpenAIMessage[] {
+  const enc = getTokenEncoder();
+  let remaining = Math.max(1, budgetTokens);
+
+  const groups = groupMessagesForBudget(messages);
+  const keptGroups: OpenAIMessage[][] = [];
+
+  for (let gi = groups.length - 1; gi >= 0; gi--) {
+    const group = groups[gi];
+    const groupTokens = group.reduce((sum, m) => sum + countMessageTokens(enc, m), 0);
+    if (groupTokens <= remaining) {
+      keptGroups.push(group);
+      remaining -= groupTokens;
+      continue;
+    }
+
+    const trimmedGroup: OpenAIMessage[] = [];
+    for (let mi = 0; mi < group.length; mi++) {
+      const m = { ...group[mi] } as OpenAIMessage;
+      if (remaining <= 0) {
+        if (typeof m.content === 'string') m.content = '';
+        else if (Array.isArray(m.content)) {
+          m.content = (m.content as (OpenAITextContent | OpenAIImageContent)[]).map((c) =>
+            c.type === 'text' ? ({ ...c, text: '' } as OpenAITextContent) : c
+          );
+        }
+        trimmedGroup.push(m);
+        continue;
+      }
+
+      if (Array.isArray(m.content)) {
+        const arr = (m.content as (OpenAITextContent | OpenAIImageContent)[]).map((c) => {
+          if (remaining <= 0) {
+            if (c.type === 'text') {
+              return { ...c, text: '' } as OpenAITextContent;
+            }
+            return c;
+          }
+          if (c.type === 'text') {
+            const newText = smartTrimByTokens(enc, c.text, remaining);
+            const used = enc.encode(newText).length;
+            remaining -= used;
+            return { ...c, text: newText } as OpenAITextContent;
+          }
+          const url = (c as OpenAIImageContent).image_url.url || '';
+          if (url.startsWith('data:')) {
+            const placeholder = '[image omitted]';
+            const used = enc.encode(placeholder).length;
+            if (used <= remaining) {
+              remaining -= used;
+              return { type: 'text', text: placeholder } as OpenAITextContent;
+            }
+            return { type: 'text', text: '.' } as OpenAITextContent;
+          }
+          return c;
+        });
+        m.content = arr;
+      } else if (typeof m.content === 'string') {
+        const newText = smartTrimByTokens(enc, m.content, remaining);
+        const used = enc.encode(newText).length;
+        remaining -= used;
+        m.content = newText;
+      }
+
+      trimmedGroup.push(m);
+    }
+
+    keptGroups.push(trimmedGroup);
+    remaining = 0;
+    break;
+  }
+
+  const result = keptGroups.reverse().flat();
+
+  const hasAnyChar = result.some((m) => {
+    if (typeof m.content === 'string') return m.content.trim().length > 0;
+    if (Array.isArray(m.content))
+      return (m.content as (OpenAITextContent | OpenAIImageContent)[]).some(
+        (c) => c.type === 'text' && (c as OpenAITextContent).text.trim().length > 0
+      );
+    return false;
+  });
+  if (!hasAnyChar) {
+    if (result.length > 0) {
+      const first = result.find((m) => m.role === 'user') || result[0];
+      if (typeof first.content === 'string') first.content = '.';
+      else if (Array.isArray(first.content))
+        (first.content as (OpenAITextContent | OpenAIImageContent)[]).unshift({
+          type: 'text',
+          text: '.',
+        });
+    } else {
+      result.push({ role: 'user', content: '.' });
     }
   }
 
@@ -538,12 +729,12 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
   }
 
   // Build OpenAI request
+  const sanitized = sanitizeOpenAIMessages(messages);
+  const clampedChars = clampOpenAIMessages(sanitized, 120000);
+  const tokenBudgeted = enforceTotalTokenBudget(clampedChars, 129000, mapModel(request.model));
   const openAIRequest: OpenAIRequest = {
     model: mapModel(request.model),
-    messages: enforceTotalCharBudget(
-      clampOpenAIMessages(sanitizeOpenAIMessages(messages), 120000),
-      129000
-    ),
+    messages: tokenBudgeted,
   };
 
   // Map temperature (same range for both APIs: 0-2 for Claude, 0-2 for OpenAI)
