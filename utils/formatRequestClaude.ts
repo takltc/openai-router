@@ -455,9 +455,11 @@ function sanitizeClaudeMessages(messages: ClaudeMessage[]): ClaudeMessage[] {
 
     // Array content
     if (Array.isArray(content)) {
-      const filtered = content.filter((c) =>
-        c.type !== 'text' || (typeof (c as any).text === 'string' && (c as any).text.trim().length > 0)
-      );
+      const filtered = content.filter((c) => {
+        if (c.type !== 'text') return true;
+        const text = (c as { text?: unknown }).text;
+        return typeof text === 'string' && text.trim().length > 0;
+      });
       if (filtered.length > 0) {
         sanitized.push({ ...msg, content: filtered });
       }
