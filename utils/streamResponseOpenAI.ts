@@ -39,10 +39,12 @@ export function convertOpenAIChunkToClaude(
   const events: ClaudeStreamEvent[] = [];
   // Initialize extended indexing state if absent
   if (typeof state.contentIndex !== 'number') state.contentIndex = 0;
-  if (!state.toolCallIndexToContentBlockIndex) state.toolCallIndexToContentBlockIndex = new Map<number, number>();
+  if (!state.toolCallIndexToContentBlockIndex)
+    state.toolCallIndexToContentBlockIndex = new Map<number, number>();
   if (!state.toolBlockStartedIndices) state.toolBlockStartedIndices = new Set<number>();
   if (!state.openToolBlockIndices) state.openToolBlockIndices = new Set<number>();
-  if (!state.toolCallsState) state.toolCallsState = new Map<number, { id?: string; name?: string; arguments: string }>();
+  if (!state.toolCallsState)
+    state.toolCallsState = new Map<number, { id?: string; name?: string; arguments: string }>();
 
   // Handle first chunk - send message_start
   if (!state.messageId && chunk.id) {
@@ -176,7 +178,10 @@ export function convertOpenAIChunkToClaude(
       // Close any open tool blocks (all indices)
       if (state.openToolBlockIndices.size) {
         for (const idx of Array.from(state.openToolBlockIndices.values()).sort((a, b) => a - b)) {
-          const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: idx };
+          const blockStop: ClaudeStreamContentBlockStop = {
+            type: 'content_block_stop',
+            index: idx,
+          };
           events.push(blockStop);
         }
         state.openToolBlockIndices.clear();
@@ -424,8 +429,13 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
         if (data === '[DONE]') {
           if (!messageStopSent) {
             if (state.contentBlockStarted) {
-              const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: 0 };
-              controller.enqueue(encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`));
+              const blockStop: ClaudeStreamContentBlockStop = {
+                type: 'content_block_stop',
+                index: 0,
+              };
+              controller.enqueue(
+                encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`)
+              );
               state.contentBlockStarted = false;
             }
             const messageDelta: ClaudeStreamMessageDelta = {
@@ -433,9 +443,15 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
               delta: { stop_reason: 'end_turn', stop_sequence: null },
               usage: { output_tokens: state.usage?.output_tokens || 0 },
             };
-            controller.enqueue(encoder.encode(`event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`));
+            controller.enqueue(
+              encoder.encode(
+                `event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`
+              )
+            );
             const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
-            controller.enqueue(encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`));
+            controller.enqueue(
+              encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`)
+            );
             messageStopSent = true;
           }
           continue;
@@ -484,7 +500,9 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
       if (!messageStopSent) {
         if (state.contentBlockStarted) {
           const blockStop: ClaudeStreamContentBlockStop = { type: 'content_block_stop', index: 0 };
-          controller.enqueue(encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`));
+          controller.enqueue(
+            encoder.encode(`event: ${blockStop.type}\ndata: ${JSON.stringify(blockStop)}\n\n`)
+          );
           state.contentBlockStarted = false;
         }
         const messageDelta: ClaudeStreamMessageDelta = {
@@ -492,9 +510,13 @@ export function createOpenAIToClaudeTransform(): TransformStream<Uint8Array, Uin
           delta: { stop_reason: 'end_turn', stop_sequence: null },
           usage: { output_tokens: state.usage?.output_tokens || 0 },
         };
-        controller.enqueue(encoder.encode(`event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`));
+        controller.enqueue(
+          encoder.encode(`event: ${messageDelta.type}\ndata: ${JSON.stringify(messageDelta)}\n\n`)
+        );
         const messageStop: ClaudeStreamMessageStop = { type: 'message_stop' };
-        controller.enqueue(encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`));
+        controller.enqueue(
+          encoder.encode(`event: ${messageStop.type}\ndata: ${JSON.stringify(messageStop)}\n\n`)
+        );
         messageStopSent = true;
       }
     },

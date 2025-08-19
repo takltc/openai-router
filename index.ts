@@ -5,14 +5,80 @@
  * @description Routes OpenAI and Anthropic API requests through Cloudflare Workers with format conversion
  */
 
-import { formatRequestClaude } from './utils/formatRequestClaude';
-import { convertClaudeToOpenAI } from './utils/formatRequestOpenAI';
+import {
+  formatRequestOpenAI,
+  convertClaudeToOpenAI,
+  convertOpenAIToClaude,
+} from './utils/formatRequestOpenAI';
 import { formatResponseOpenAI } from './utils/formatResponseOpenAI';
-import { formatResponseClaude } from './utils/formatResponseClaude';
 import { createOpenAIToClaudeTransform } from './utils/streamResponseOpenAI';
 import { createClaudeToOpenAITransform } from './utils/streamResponseClaude';
 import { validateOpenAIToolCalls, fixOrphanedToolCalls } from './utils/validateToolCalls';
-import type { OpenAIRequest, ClaudeRequest, ClaudeMessage } from './utils/types';
+import type {
+  OpenAIRequest,
+  OpenAIMessage,
+  OpenAIToolCall,
+  ClaudeRequest,
+  ClaudeMessage,
+} from './utils/types';
+// Session-level tool signature cache to suppress duplicate tool calls across requests
+const TOOL_SIG_CACHE: Map<string, Set<string>> = new Map();
+
+function normalizePathLike(p: string): string {
+  try {
+    if (typeof p !== 'string') return '';
+    if (p.startsWith('~/')) {
+      const root =
+        (globalThis as unknown as { process?: { env?: Record<string, string> } })?.process?.env
+          ?.WORKSPACE_ROOT || '/Volumes/JJZ/jerryjiang/code/ai';
+      return `${root}/${p.slice(2)}`.replace(/\\+/g, '/');
+    }
+    return p.replace(/\\+/g, '/');
+  } catch {
+    return p;
+  }
+}
+
+function canonicalizeToolCallSignature(name: string, argsJson: string): string {
+  let obj: Record<string, unknown> = {};
+  try {
+    obj = JSON.parse(argsJson || '{}');
+  } catch {
+    return `${name}|${(argsJson || '').slice(0, 300)}`;
+  }
+  const IGNORE_KEYS = new Set([
+    'offset',
+    'limit',
+    'start',
+    'end',
+    'range',
+    'head_limit',
+    '-C',
+    '-A',
+    '-B',
+    'count',
+    'files_with_matches',
+    'output_mode',
+    'glob',
+    'type',
+    'path_only',
+    'preview',
+    'page',
+    'page_size',
+  ]);
+  const PATH_KEYS = new Set(['file_path', 'filepath', 'file', 'path']);
+  const clean: Record<string, unknown> = {};
+  const keys = Object.keys(obj)
+    .filter((k) => !IGNORE_KEYS.has(k))
+    .sort();
+  for (const k of keys) {
+    const v = (obj as Record<string, unknown>)[k];
+    if (typeof v === 'string' && PATH_KEYS.has(k)) clean[k] = normalizePathLike(v);
+    else clean[k] = v as unknown;
+  }
+  const canonical = JSON.stringify(clean).slice(0, 300);
+  return `${name}|${canonical}`;
+}
 
 export interface Env {
   OPENAI_BASE_URL: string;
@@ -23,6 +89,21 @@ export interface Env {
   JSON_SCHEMA_VALIDATE?: 'true' | 'false' | '1' | '0';
   DEFAULT_MAX_TOKENS_MAP?: string;
   CLAUDE_DEFAULT_MAX_OUTPUT_TOKENS?: string;
+  // Budget configs (string numbers), optional
+  CLAUDE_TOTAL_INPUT_BUDGET_CHARS?: string; // default 129000
+  CLAUDE_PER_FRAGMENT_MAX_CHARS?: string; // default 120000
+  CLAUDE_SYSTEM_MAX_CHARS?: string; // default 120000
+  CLAUDE_TOOL_PREVIEW_MAX_CHARS?: string; // default 4000
+  // Truncation behavior configs (optional)
+  CLAUDE_HEADROOM_RATIO?: string; // default 0.98
+  CLAUDE_TOKENIZER_KIND?: string; // 'char' | 'word' | 'approx_byte' | `tiktoken:<name>`
+  // Conversation buffer memory configs
+  CLAUDE_MEMORY_MODE?: 'buffer' | 'off'; // default buffer
+  CLAUDE_MEMORY_MAX_TURNS?: string; // default 8
+  CLAUDE_MEMORY_MAX_CHARS?: string; // optional
+  // Preflight token counting
+  CLAUDE_PREFLIGHT_COUNT?: 'true' | 'false' | '1' | '0';
+  CLAUDE_INPUT_LIMIT_TOKENS?: string; // default 129024
 }
 
 // Helper: convert Headers to plain object without relying on entries() or iteration protocol
@@ -386,6 +467,71 @@ async function handleOpenAIToClaude(
       headers: redactHeaders(request.headers),
     });
 
+    // Global dedupe: collapse duplicate tool calls by signature across entire conversation
+    try {
+      const sessionId = request.headers.get('X-Session-Id') || 'default';
+      if (!TOOL_SIG_CACHE.has(sessionId)) TOOL_SIG_CACHE.set(sessionId, new Set());
+      const sessionSeen = TOOL_SIG_CACHE.get(sessionId)!;
+      const seenSig = new Set<string>();
+      const deduped: OpenAIMessage[] = [];
+      const collectToolSig = (tc: OpenAIToolCall): string => {
+        return canonicalizeToolCallSignature(tc.function?.name || '', tc.function?.arguments || '');
+      };
+      for (const m of (openAIRequest.messages || []) as OpenAIMessage[]) {
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+          const uniqueBySig = new Map<string, OpenAIToolCall>();
+          const suppressedIds: string[] = [];
+          for (const tc of m.tool_calls) {
+            const sig = collectToolSig(tc);
+            // skip if already seen in this session
+            if (sessionSeen.has(sig)) {
+              // record as suppressed to synthesize a minimal tool result to avoid re-trigger
+              suppressedIds.push(tc.id);
+              continue;
+            }
+            if (!seenSig.has(sig) && !uniqueBySig.has(sig)) {
+              uniqueBySig.set(sig, tc);
+              seenSig.add(sig);
+            }
+          }
+          const kept = Array.from(uniqueBySig.values());
+          if (kept.length > 0) deduped.push({ ...m, tool_calls: kept });
+          else deduped.push({ ...m, tool_calls: [] });
+          // Insert synthetic tool results for suppressed duplicates to satisfy pairing
+          for (const dupId of suppressedIds) {
+            const toolMsg = {
+              role: 'tool' as const,
+              content: JSON.stringify({
+                duplicate_call: true,
+                note: 'Suppressed duplicate tool invocation by signature',
+              }),
+              // attach id via cast when pushing
+            } as OpenAIMessage;
+            (toolMsg as unknown as { tool_call_id: string }).tool_call_id =
+              dupId as unknown as string;
+            deduped.push(toolMsg);
+          }
+        } else if (m.role === 'tool' && m.tool_call_id) {
+          // keep tool results only if their originating signature still exists in conversation
+          // we can't map id->sig reliably here without state, so keep tool messages as-is;
+          // they will be adjusted by ensureToolCallAdjacency downstream
+          deduped.push(m);
+        } else {
+          deduped.push(m);
+        }
+      }
+      openAIRequest.messages = deduped;
+      // update session-level cache after dedupe
+      for (const m of deduped) {
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            const sig = collectToolSig(tc);
+            sessionSeen.add(sig);
+          }
+        }
+      }
+    } catch {}
+
     // Optional: tool call validation/fixup
     const validationMode = (env.VALIDATE_TOOL_CALLS as Env['VALIDATE_TOOL_CALLS']) || 'off';
     if (validationMode !== 'off') {
@@ -415,7 +561,8 @@ async function handleOpenAIToClaude(
     }
 
     // Convert OpenAI request to Claude format
-    const claudeRequest = formatRequestClaude(openAIRequest as OpenAIRequest);
+    let claudeRequest = convertOpenAIToClaude(openAIRequest as OpenAIRequest);
+
     console.log('Claude request formatted:', {
       stream: claudeRequest.stream,
       model: claudeRequest.model,
@@ -439,10 +586,14 @@ async function handleOpenAIToClaude(
 
     console.log('Sending request to Claude API:', env.ANTHROPIC_BASE_URL);
     // Forward to Claude API
-    const claudeResponse = await fetch(`${env.ANTHROPIC_BASE_URL}/messages`, {
+    let claudeResponse = await fetch(`${env.ANTHROPIC_BASE_URL}/messages`, {
       method: 'POST',
       headers: headers,
-      body: JSON.stringify(claudeRequest),
+      body: JSON.stringify({
+        ...claudeRequest,
+        // reduce chance of provider-side token explosion due to generation
+        max_tokens: Math.min(claudeRequest.max_tokens || 262000, 2048),
+      }),
     });
 
     console.log('Claude API response status:', claudeResponse.status, claudeResponse.statusText);
@@ -468,13 +619,41 @@ async function handleOpenAIToClaude(
         errorData = { error: { message: 'Failed to parse error response', type: 'parse_error' } };
       }
       console.error('Claude API error data:', errorData);
-      return new Response(JSON.stringify(errorData), {
-        status: claudeResponse.status,
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'application/json',
-        },
-      });
+
+      // If input length exceeded, retry once with reduced budgets
+      try {
+        const msg = String(errorData?.error?.message || '');
+        if (/Range of input length should be\s*\[1,\s*129024\]/i.test(msg)) {
+          console.warn('Retrying with reduced input budgets');
+          claudeRequest = convertOpenAIToClaude({
+            ...openAIRequest,
+            max_tokens: Math.min((openAIRequest as OpenAIRequest).max_tokens || 262000, 1536),
+          });
+          claudeResponse = await fetch(`${env.ANTHROPIC_BASE_URL}/messages`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              ...claudeRequest,
+              max_tokens: Math.min(claudeRequest.max_tokens || 262000, 1536),
+            }),
+          });
+        }
+      } catch (e) {
+        console.warn('Budget retry failed:', e);
+      }
+
+      if (!claudeResponse.ok) {
+        try {
+          errorData = await claudeResponse.json();
+        } catch {}
+        return new Response(JSON.stringify(errorData), {
+          status: claudeResponse.status,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+          },
+        });
+      }
     }
 
     // Handle response based on stream mode
@@ -512,7 +691,7 @@ async function handleOpenAIToClaude(
         });
         throw new Error('Failed to parse Claude API response');
       }
-      const openAIResponse = formatResponseClaude(claudeData, openAIRequest as OpenAIRequest);
+      const openAIResponse = claudeData;
 
       // Optional JSON schema validation (non-stream only)
       if (env.JSON_SCHEMA_VALIDATE) {
@@ -633,7 +812,7 @@ async function handleClaudeToOpenAI(
     const isStream = claudeRequest.stream === true;
 
     // Convert Claude request to OpenAI format
-    const openAIRequest = convertClaudeToOpenAI(claudeRequest);
+    const openAIRequest = formatRequestOpenAI(claudeRequest);
     if (!openAIRequest) {
       return new Response(
         JSON.stringify({

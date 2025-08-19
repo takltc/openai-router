@@ -11,11 +11,18 @@
     "lint": "eslint . --ext .ts,.tsx,.js --fix",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["openai", "anthropic", "api", "router", "cloudflare-workers"],
+  "keywords": [
+    "openai",
+    "anthropic",
+    "api",
+    "router",
+    "cloudflare-workers"
+  ],
   "author": "jizhejiang",
   "license": "Apache-2.0",
   "description": "OpenAI API router for Cloudflare Workers with Anthropic support",
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.24.3",
     "@eslint/js": "^9.31.0",
     "@types/node": "^20.10.0",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
@@ -24,11 +31,13 @@
     "eslint": "^9.31.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.3",
+    "openai": "^4.52.0",
     "prettier": "^3.6.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4",
-    "wrangler": "^4.28.1",
-    "openai": "^4.52.0",
-    "@anthropic-ai/sdk": "^0.24.3"
+    "wrangler": "^4.28.1"
+  },
+  "dependencies": {
+    "tiktoken": "^1.0.22"
   }
 }

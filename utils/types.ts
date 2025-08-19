@@ -520,6 +520,8 @@ export interface StreamConversionState {
   toolCallsState?: Map<number, { id?: string; name?: string; arguments: string }>;
   /** The currently active tool block index, if single active */
   currentToolCallIndex?: number;
+  /** Dedup guard: ids of tool_use blocks whose start has been emitted */
+  emittedToolStartIds?: Set<string>;
 }
 
 /**

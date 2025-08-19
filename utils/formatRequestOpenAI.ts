@@ -1,10 +1,15 @@
 /**
- * Claude to OpenAI request format converter
+ * API Request Format Converter
  * @author jizhejiang
  * @date 2025-08-11
  * @update 2025-08-12
- * @description Converts Claude API request format to OpenAI format, including message mapping,
- * system prompts, tools conversion, and parameter mapping
+ * @description Bidirectional converter for request formats between Claude and OpenAI APIs
+ *
+ * This file contains functions to convert between Claude and OpenAI request formats.
+ * The naming can be confusing as formatRequestOpenAI.ts contains functions that convert
+ * in both directions:
+ * - formatRequestOpenAI: Converts from Claude format TO OpenAI format
+ * - convertClaudeToOpenAI: Alias/safe wrapper for formatRequestOpenAI
  *
  * Model Mapping Strategy (v2.0.0+):
  * - Primary: Direct pass-through - model names are transmitted without conversion
@@ -20,6 +25,7 @@ import type {
   ClaudeMessage,
   ClaudeContent,
   ClaudeToolUseContent,
+  ClaudeToolResultContent,
   ClaudeImageContent,
   ClaudeTool,
   ClaudeSystemMessage,
@@ -39,7 +45,7 @@ import type {
 /**
  * Extract base64 data from data URL
  */
-// helper reserved for future usage (intentionally unused to satisfy linter)
+// This helper is currently unused but reserved for future functionality
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function extractBase64FromDataUrl(_dataUrl: string): { mediaType: string; data: string } | null {
   return null;
@@ -72,6 +78,60 @@ function convertImageContent(content: ClaudeImageContent): OpenAIImageContent {
       detail: 'auto',
     },
   };
+}
+
+// Build a canonical signature for a tool call, ignoring common paging/windowing keys
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function canonicalizeToolCallSignature(name: string, argsJson: string): string {
+  let obj: Record<string, unknown> = {};
+  try {
+    obj = JSON.parse(argsJson || '{}');
+  } catch {
+    return `${name}|${(argsJson || '').slice(0, 300)}`;
+  }
+  // Normalize common path fields to avoid ~/ vs absolute path mismatches
+  const WORKSPACE_ROOT =
+    (globalThis as unknown as { process?: { env?: Record<string, string> } })?.process?.env
+      ?.WORKSPACE_ROOT || '/Volumes/JJZ/jerryjiang/code/ai';
+  const normalizePath = (p: string): string => {
+    if (p.startsWith('~/')) return `${WORKSPACE_ROOT}/${p.slice(2)}`.replace(/\\+/g, '/');
+    return p.replace(/\\+/g, '/');
+  };
+  const PATH_KEYS = new Set(['file_path', 'filepath', 'file', 'path']);
+  for (const k of Object.keys(obj)) {
+    const v = (obj as Record<string, unknown>)[k];
+    if (typeof v === 'string' && PATH_KEYS.has(k)) {
+      (obj as Record<string, unknown>)[k] = normalizePath(v);
+    }
+  }
+  const IGNORE_KEYS = new Set([
+    'offset',
+    'limit',
+    'start',
+    'end',
+    'range',
+    'head_limit',
+    '-C',
+    '-A',
+    '-B',
+    'count',
+    'files_with_matches',
+    'output_mode',
+    'glob',
+    'type',
+    'path_only',
+    'preview',
+    'page',
+    'page_size',
+  ]);
+  const clean: Record<string, unknown> = {};
+  const keys = Object.keys(obj)
+    .filter((k) => !IGNORE_KEYS.has(k))
+    .sort();
+  for (const k of keys) clean[k] = (obj as Record<string, unknown>)[k];
+  const canonical = JSON.stringify(clean);
+  const head = canonical.slice(0, 300);
+  return `${name}|${head}`;
 }
 
 /**
@@ -174,9 +234,13 @@ function convertMessage(message: ClaudeMessage): OpenAIMessage | OpenAIMessage[]
           const resultContent =
             typeof item.content === 'string' ? item.content : JSON.stringify(item.content);
 
+          const TOOL_RESULT_PREVIEW = 4000;
           toolMessages.push({
             role: 'tool',
-            content: item.is_error ? `Error: ${resultContent}` : resultContent,
+            content: clampText(
+              item.is_error ? `Error: ${resultContent}` : resultContent,
+              TOOL_RESULT_PREVIEW
+            ),
             tool_call_id: item.tool_use_id,
           });
         }
@@ -216,12 +280,16 @@ function convertMessage(message: ClaudeMessage): OpenAIMessage | OpenAIMessage[]
   if (Array.isArray(message.content)) {
     for (const item of message.content as ClaudeContent[]) {
       if ((item as ClaudeToolUseContent).type === 'tool_use') {
+        const TOOL_ARG_PREVIEW = 4000;
         toolCalls.push({
           id: (item as ClaudeToolUseContent).id,
           type: 'function',
           function: {
             name: (item as ClaudeToolUseContent).name,
-            arguments: clampText(JSON.stringify((item as ClaudeToolUseContent).input), 120000),
+            arguments: clampText(
+              JSON.stringify((item as ClaudeToolUseContent).input),
+              TOOL_ARG_PREVIEW
+            ),
           },
         });
       }
@@ -230,7 +298,12 @@ function convertMessage(message: ClaudeMessage): OpenAIMessage | OpenAIMessage[]
 
   // Add tool calls if present
   if (toolCalls.length > 0) {
-    openAIMessage.tool_calls = toolCalls;
+    // Dedupe by tool call id to avoid duplicates
+    const uniqueById = new Map<string, OpenAIToolCall>();
+    for (const tc of toolCalls) {
+      if (!uniqueById.has(tc.id)) uniqueById.set(tc.id, tc);
+    }
+    openAIMessage.tool_calls = Array.from(uniqueById.values());
     // If content is empty string or empty array, set to null to comply with providers that
     // require non-empty input length when content is present.
     const isEmptyString =
@@ -393,6 +466,7 @@ function clampOpenAIMessages(messages: OpenAIMessage[], maxChars: number): OpenA
   });
 }
 
+// enforceTotalCharBudget is currently unused but reserved for future functionality
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function enforceTotalCharBudget(messages: OpenAIMessage[], budget: number): OpenAIMessage[] {
   let remaining = Math.max(1, budget);
@@ -469,7 +543,7 @@ interface TokenEncoder {
   decode: (tokens: number[]) => string;
 }
 
-// modelName reserved for future model-specific heuristics
+// modelName is currently unused but reserved for future model-specific heuristics
 function getTokenEncoder(): TokenEncoder {
   const approxEncode = (text: string): number[] => {
     if (!text) return [];
@@ -684,18 +758,21 @@ function ensureToolCallAdjacency(messages: OpenAIMessage[]): OpenAIMessage[] {
         insertPos += moved.length;
       }
 
-      // Insert placeholders for any still-missing ids
-      if (neededIds.size > 0) {
-        const placeholders: OpenAIMessage[] = [];
-        neededIds.forEach((id) => {
-          placeholders.push({
-            role: 'tool',
-            // Casting to allow tool_call_id on tool role
-            tool_call_id: id as unknown as string,
-            content: '.',
-          } as OpenAIMessage);
-        });
-        arr.splice(insertPos, 0, ...placeholders);
+      // Dedupe adjacent tool messages by tool_call_id after reordering
+      let dedupeStart = i + 1;
+      while (dedupeStart < arr.length && arr[dedupeStart].role === 'tool') {
+        const seenToolIds = new Set<string>();
+        let j = dedupeStart;
+        while (j < arr.length && arr[j].role === 'tool') {
+          const id = (arr[j] as OpenAIMessage & { tool_call_id?: string }).tool_call_id;
+          if (id && seenToolIds.has(id)) {
+            arr.splice(j, 1);
+            continue;
+          }
+          if (id) seenToolIds.add(id);
+          j++;
+        }
+        break;
       }
     }
   }
@@ -762,13 +839,30 @@ function sanitizeOpenAIMessages(messages: OpenAIMessage[]): OpenAIMessage[] {
 }
 
 /**
- * Convert Claude request to OpenAI format
- * Main converter function that handles all aspects of the conversion
+ * Converts a request from Claude API format to OpenAI API format
+ *
+ * Note: Despite the name suggesting it formats OpenAI requests, this function
+ * converts FROM Claude format TO OpenAI format. This naming is historical and
+ * preserved for compatibility.
+ *
+ * @param request - A request object in Claude API format
+ * @returns A request object in OpenAI API format
+ * @throws Error if conversion fails
+ *
+ * Example:
+ * ```typescript
+ * const claudeRequest = {
+ *   model: 'claude-3-sonnet-20240229',
+ *   messages: [{ role: 'user', content: 'Hello' }],
+ *   max_tokens: 1000
+ * };
+ * const openAIRequest = formatRequestOpenAI(claudeRequest);
+ * // openAIRequest is now in OpenAI format
+ * ```
  */
 export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest> = (
   request: ClaudeRequest
 ): OpenAIRequest => {
-  // Extract system prompt
   // Extract system prompt
   const systemPrompt = extractSystemPrompt(request.system);
 
@@ -798,8 +892,28 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
   const adjusted = ensureToolCallAdjacency(messages);
 
   const sanitized = sanitizeOpenAIMessages(adjusted);
-  const clampedChars = clampOpenAIMessages(sanitized, 120000);
-  const tokenBudgeted = enforceTotalTokenBudget(clampedChars, 129000, mapModel(request.model));
+  // 使用可配置预算并保守留余量，默认遵循 129024 限制但为不同 provider 预留余地
+  const DEFAULT_CHAR_BUDGET = 250000; // 对部分 provider 放宽
+  const DEFAULT_TOKEN_BUDGET = 129000; // 遵循 129024 限制
+  const clampedChars = clampOpenAIMessages(sanitized, DEFAULT_CHAR_BUDGET);
+
+  // 为工具定义等元数据预留 token 开销，避免总输入超限
+  const encForBudget = getTokenEncoder();
+  const toolsOverheadTokens =
+    Array.isArray(request.tools) && request.tools.length > 0
+      ? encForBudget.encode(JSON.stringify(request.tools)).length
+      : 0;
+  const SAFETY_TOKENS = 1024; // 额外安全余量
+  const effectiveTokenBudget = Math.max(
+    1024,
+    DEFAULT_TOKEN_BUDGET - toolsOverheadTokens - SAFETY_TOKENS
+  );
+
+  const tokenBudgeted = enforceTotalTokenBudget(
+    clampedChars,
+    effectiveTokenBudget,
+    mapModel(request.model)
+  );
   const openAIRequest: OpenAIRequest = {
     model: mapModel(request.model),
     messages: tokenBudgeted,
@@ -818,6 +932,9 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
   // Map max_tokens
   if (request.max_tokens !== undefined) {
     openAIRequest.max_tokens = request.max_tokens;
+  } else {
+    // 给缺省请求一个保守的默认生成上限，避免 provider 计入过多生成预算
+    openAIRequest.max_tokens = Math.min(1024, openAIRequest.max_tokens || 1024);
   }
 
   // Map stop sequences
@@ -858,7 +975,7 @@ export const formatRequestOpenAI: RequestConverter<ClaudeRequest, OpenAIRequest>
  */
 export function validateClaudeRequest(request: ClaudeRequest): boolean {
   // Check required fields
-  if (!request.model || !request.messages || !request.max_tokens) {
+  if (!request.model || !request.messages) {
     return false;
   }
 
@@ -896,7 +1013,24 @@ export function validateClaudeRequest(request: ClaudeRequest): boolean {
 }
 
 /**
- * Helper function to convert with validation
+ * Safely converts a request from Claude API format to OpenAI API format with validation
+ *
+ * This is a wrapper around formatRequestOpenAI that includes validation of the input request.
+ * It validates the Claude request before attempting conversion.
+ *
+ * @param request - A request object in Claude API format
+ * @returns A request object in OpenAI API format, or null if validation/conversion fails
+ *
+ * Example:
+ * ```typescript
+ * const claudeRequest = {
+ *   model: 'claude-3-sonnet-20240229',
+ *   messages: [{ role: 'user', content: 'Hello' }],
+ *   max_tokens: 1000
+ * };
+ * const openAIRequest = convertClaudeToOpenAI(claudeRequest);
+ * // openAIRequest is now in OpenAI format, or null if invalid
+ * ```
  */
 export function convertClaudeToOpenAI(request: ClaudeRequest): OpenAIRequest | null {
   if (!validateClaudeRequest(request)) {
@@ -910,6 +1044,232 @@ export function convertClaudeToOpenAI(request: ClaudeRequest): OpenAIRequest | n
     console.error('Error converting Claude request to OpenAI format:', error);
     return null;
   }
+}
+
+/**
+ * Converts a request from OpenAI API format to Claude API format
+ */
+export function convertOpenAIToClaude(request: OpenAIRequest): ClaudeRequest {
+  type ClaudeBase64MediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  // Extract system messages and normalize remaining messages
+  const systemTexts: string[] = [];
+  const nonSystemMessages: OpenAIMessage[] = [];
+
+  const extractTextContent = (content: OpenAIMessageContent): string => {
+    if (typeof content === 'string') return content;
+    try {
+      const texts = (content as Array<OpenAITextContent | OpenAIImageContent>)
+        .filter((c) => (c as OpenAITextContent).type === 'text')
+        .map((c) => (c as OpenAITextContent).text)
+        .filter((t) => typeof t === 'string' && t.length > 0);
+      return texts.join('\n');
+    } catch {
+      return '';
+    }
+  };
+
+  for (const msg of request.messages || []) {
+    if (msg.role === 'system') {
+      const text = extractTextContent(msg.content);
+      if (text) systemTexts.push(text);
+      continue;
+    }
+    nonSystemMessages.push(msg);
+  }
+
+  // Helpers to map image content from OpenAI to Claude
+  const convertOpenAIImageToClaude = (img: OpenAIImageContent): ClaudeImageContent => {
+    const url = img.image_url?.url || '';
+    if (url.startsWith('data:')) {
+      // data URL: data:<mediaType>;base64,<data>
+      const match = url.match(/^data:([^;]+);base64,(.+)$/i);
+      if (match) {
+        const mediaType = match[1] as ClaudeBase64MediaType;
+        const data = match[2];
+        return {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaType,
+            data,
+          },
+        } as ClaudeImageContent;
+      }
+    }
+    return {
+      type: 'image',
+      source: {
+        type: 'url',
+        url,
+      },
+    } as ClaudeImageContent;
+  };
+
+  // Convert OpenAI messages to Claude messages
+  const claudeMessages: ClaudeMessage[] = [];
+  let pendingToolResults: ClaudeToolResultContent[] = [];
+
+  const flushPendingToolResults = (): void => {
+    if (pendingToolResults.length > 0) {
+      claudeMessages.push({
+        role: 'user',
+        content: pendingToolResults as unknown as ClaudeContent[],
+      });
+      pendingToolResults = [];
+    }
+  };
+
+  for (const msg of nonSystemMessages) {
+    if (msg.role === 'tool' || msg.role === 'function') {
+      // Accumulate tool results to emit as a single Claude 'user' message
+      const raw = typeof msg.content === 'string' ? msg.content : extractTextContent(msg.content);
+      let parsed: string | Record<string, unknown> = raw;
+      try {
+        // Attempt to parse JSON tool results
+        parsed = JSON.parse(raw);
+      } catch {
+        // keep raw string
+      }
+      pendingToolResults.push({
+        type: 'tool_result',
+        tool_use_id: (msg as OpenAIMessage).tool_call_id || '',
+        content: parsed,
+      });
+      continue;
+    }
+
+    // Flush any pending tool results before non-tool messages
+    flushPendingToolResults();
+
+    if (msg.role === 'user') {
+      const parts: ClaudeContent[] = [];
+      if (typeof msg.content === 'string') {
+        parts.push({ type: 'text', text: msg.content });
+      } else if (Array.isArray(msg.content)) {
+        for (const c of msg.content) {
+          if ((c as OpenAITextContent).type === 'text') {
+            parts.push({ type: 'text', text: (c as OpenAITextContent).text });
+          } else if ((c as OpenAIImageContent).type === 'image_url') {
+            parts.push(convertOpenAIImageToClaude(c as OpenAIImageContent));
+          }
+        }
+      }
+      claudeMessages.push({ role: 'user', content: parts as unknown as ClaudeContent[] });
+      continue;
+    }
+
+    if (msg.role === 'assistant') {
+      const parts: ClaudeContent[] = [];
+      // Text parts
+      if (typeof msg.content === 'string') {
+        if (msg.content.length > 0) parts.push({ type: 'text', text: msg.content });
+      } else if (Array.isArray(msg.content)) {
+        for (const c of msg.content) {
+          if ((c as OpenAITextContent).type === 'text') {
+            const text = (c as OpenAITextContent).text;
+            if (text && text.length > 0) parts.push({ type: 'text', text });
+          } else if ((c as OpenAIImageContent).type === 'image_url') {
+            parts.push(convertOpenAIImageToClaude(c as OpenAIImageContent));
+          }
+        }
+      }
+      // Tool calls
+      if (Array.isArray((msg as OpenAIMessage).tool_calls)) {
+        const toolCalls = ((msg as OpenAIMessage).tool_calls || []) as OpenAIToolCall[];
+        for (const call of toolCalls) {
+          let args: Record<string, unknown> = {};
+          try {
+            args = JSON.parse(call.function.arguments || '{}');
+          } catch {
+            // keep empty
+          }
+          parts.push({
+            type: 'tool_use',
+            id: call.id,
+            name: call.function.name,
+            input: args,
+          } as ClaudeToolUseContent);
+        }
+      } else if ((msg as OpenAIMessage).function_call) {
+        const fc = (msg as OpenAIMessage).function_call as { name: string; arguments: string };
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(fc.arguments || '{}');
+        } catch {
+          // ignore parse error
+        }
+        parts.push({
+          type: 'tool_use',
+          id: `fc_${Date.now()}`,
+          name: fc.name,
+          input: args,
+        } as ClaudeToolUseContent);
+      }
+
+      claudeMessages.push({ role: 'assistant', content: parts as unknown as ClaudeContent[] });
+      continue;
+    }
+  }
+
+  // Flush any trailing tool results
+  flushPendingToolResults();
+
+  // Map tools definition
+  const convertTools = (tools?: OpenAITool[]): ClaudeTool[] | undefined => {
+    if (!Array.isArray(tools) || tools.length === 0) return undefined;
+    const result: ClaudeTool[] = [];
+    for (const t of tools) {
+      if (!t || t.type !== 'function') continue;
+      const fn = t.function;
+      const params = (fn?.parameters || {}) as Record<string, unknown>;
+      const properties = (params as { properties?: Record<string, unknown> }).properties || {};
+      const required = (params as { required?: string[] }).required || [];
+      const input_schema = {
+        type: 'object' as const,
+        properties,
+        required,
+        additionalProperties: fn?.strict === true ? false : undefined,
+      };
+      result.push({ name: fn.name, description: fn.description || '', input_schema });
+    }
+    return result.length > 0 ? result : undefined;
+  };
+
+  // Map tool choice
+  const convertToolChoice = (
+    choice: OpenAIRequest['tool_choice']
+  ): ClaudeRequest['tool_choice'] | undefined => {
+    if (!choice) return undefined;
+    if (choice === 'auto') return { type: 'auto' };
+    if (choice === 'required') return { type: 'any' };
+    if (choice === 'none') return undefined;
+    if ((choice as { type?: string }).type === 'function') {
+      const name = (choice as { function?: { name?: string } }).function?.name;
+      if (name) return { type: 'tool', name };
+    }
+    return undefined;
+  };
+
+  // Build final Claude request
+  const claudeRequest: ClaudeRequest = {
+    model: request.model,
+    messages: claudeMessages,
+    system: systemTexts.length > 0 ? systemTexts.join('\n') : undefined,
+    max_tokens: Math.max(1, Number(request.max_tokens || 0) || 1024),
+    temperature: request.temperature,
+    top_p: request.top_p,
+    stop_sequences: Array.isArray(request.stop)
+      ? (request.stop as string[])
+      : typeof request.stop === 'string'
+        ? [request.stop]
+        : undefined,
+    stream: request.stream,
+    metadata: request.user ? { user_id: request.user } : undefined,
+    tools: convertTools(request.tools),
+    tool_choice: convertToolChoice(request.tool_choice),
+  };
+
+  return claudeRequest;
 }
 
 // Export default converter
